@@ -81,7 +81,7 @@ The rows below aren't. The remaining differences are real disagreements between 
 
 - **Native Rust:**
   - the probe binary is 3.2 MB, and all crates are MIT or Apache-2.0;
-  - it could live in the server, or in `minimoon_tags` if the apps ever want it on-device.
+  - it would live in the server, next to the server's copy of the tag-reading code.
 - **MediaInfoLib:**
   - `libmediainfo` is 8.0 MB plus `libzen` 0.3 MB, both BSD-2;
   - it's C++, so the Rust server would need FFI bindings.
