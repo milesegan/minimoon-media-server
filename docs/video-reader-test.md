@@ -1,7 +1,7 @@
 # Video reader test (MMP spec §10, step 7), 2026-11-14
 
 **Recommendation: native Rust.** Use `matroska-demuxer`, `mp4-atom`, `scuffle-h265`, `h264-reader`, `scuffle-av1` and `lofty`, plus about 240 lines of hand-written parsing.
-- **Correctness:** it matched ffprobe and MediaInfo on every field that matters, and it caught every synthetic HDR and Dolby Vision case.
+- **Correctness:** it agreed with ffprobe and MediaInfo on duration, codec, size, transfer, Dolby Vision, HDR10+ and covers for all 107 real files, and it caught every synthetic HDR and Dolby Vision case. The tools differed on frame rate, channel count, language and title for some files (below), and the probe doesn't yet read MP4 forced flags.
 - **Speed and reads:** it's the fastest of the three, and it reads the least (median 100 KB per file).
 - **Packaging:** it builds into the existing Rust server as a 3.2 MB binary, with permissive licences throughout.
 - **Remaining gaps:** three small ones, listed below, each fixable.
