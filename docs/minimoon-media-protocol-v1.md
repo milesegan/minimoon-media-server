@@ -4,7 +4,7 @@ Status: proposal, revised 2026-11-14 after review. Nothing is built.
 
 - **Server:** minimoon-media-server, the renamed minimoon-sync.
 - **Clients:** MiniMoon (macOS, iOS, tvOS) and Matinee (tvOS, macOS).
-- **Legacy:** the legacy sync protocol (`/files`, `/file-by-path` on port 41324) keeps running for older MiniMoon iOS clients while pairing is off (§8). MMP is a separate protocol on its own port, with no compatibility with the legacy one.
+- **MMP only:** the server speaks only MMP. The Sync app's protocol (`/files`, `/file-by-path` on port 41324) is dropped, not kept alongside. The apps handle the move from it to MMP; that transition is outside this spec.
 - **Read-only:** clients never write anything to the server or its folders. Every slice and item route is a GET; the only POSTs are the pairing routes (protocol 1.1), which record a device in the server's own settings (§4). Watch progress, play counts, favourites and every other kind of per-user state stay on the client device, as they do today.
 
 ## 1. Why this exists: the advantage over Jellyfin, Navidrome and Plex
@@ -59,7 +59,7 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
 
 - **Transport:** HTTP/1.1 (HTTP/2 allowed). JSON in UTF-8, gzip if the client accepts it.
 - **Methods:** every `/v1` route is GET (and HEAD), except the two pairing routes in §4. The server answers any other method with `405`.
-- **Port:** 41325 by default, separate from the legacy 41324.
+- **Port:** 41325 by default, not the Sync server's 41324, so a client never mistakes one protocol for the other.
 - **Encryption:** plain HTTP in v1; see §9 for why and what replaces it later.
 - **Bonjour:** the server advertises `_mmserver._tcp` (8 characters, under the 15-character limit). TXT records:
   - `id`: the server's UUID, persisted for the life of the install
@@ -80,7 +80,7 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
 
 There is one household and no user accounts. Every client that can reach the server sees every published slice.
 
-**Open (`auth: none`, the default, and the only mode in 1.0).** No token, code or password. Any device on the local network can list the published slices and read the files in them, exactly as with the legacy Sync server today. Clients skip the pairing screen, and media URLs are plain `/v1/items/{id}/content` URLs that VLCKit and AVPlayer can open directly.
+**Open (`auth: none`, the default, and the only mode in 1.0).** No token, code or password. Any device on the local network can list the published slices and read the files in them, exactly as with the Sync server today. Clients skip the pairing screen, and media URLs are plain `/v1/items/{id}/content` URLs that VLCKit and AVPlayer can open directly.
 
 **Pairing (`auth: pairing`, protocol 1.1, a desktop-app setting: "Require a code for new devices").** A code rather than a password: the server shows six digits and the client asks for them once. There's nothing to remember or retype on each device, and still no account.
 
@@ -101,7 +101,7 @@ There is one household and no user accounts. Every client that can reach the ser
    - **Renewal:** a request after expiry gets `401 url_expired`. The client asks for a new URL and hands it to the player, which covers seeking after a long pause.
    - **Slices still apply:** a signed URL for an item that's no longer in any published slice gets `404`, like every other route (§8).
 
-**Switching modes.** Turning pairing on makes connected clients get `401 not_paired`; each shows the pairing screen once. It also turns off the legacy port (41324), which has no authentication; the desktop app says so when the setting is switched on. Turning pairing off makes the server ignore tokens and turns the legacy port back on.
+**Switching modes.** Turning pairing on makes connected clients get `401 not_paired`; each shows the pairing screen once. Turning pairing off makes the server ignore tokens.
 
 `GET /v1/server` never needs a token; it's what a client calls first:
 
@@ -178,7 +178,7 @@ There is one household and no user accounts. Every client that can reach the ser
   - **`offline`** is kept. A client must still not treat a missing shared folder's files as deleted.
   - **Its own ETag (`filesEtag`).** The file list is a different representation from the full index, so it has its own strong ETag. That ETag changes only when the list changes: a file added, removed, moved, or changed in size, mtime or `rev`, a folder going offline or coming back, or the slice definition changing which files it covers. Metadata re-reads that don't bump `rev` don't change it, so a server-side reader upgrade doesn't make the iOS app download the list again. `If-None-Match` and `304` work as for the full index.
   - **The client rules are the same,** apart from metadata: apply the list all-or-nothing, compare by item `id`, never remove offline folders' items, and redownload media when `size`, `mtime` or `rev` changed. The iOS app stores the `rev` it downloaded alongside size and mtime. The metadata rule doesn't apply, because the client reads metadata from its own copies of the files.
-  - **Size (estimated):** about 180 bytes per item before gzip (the example above), roughly a quarter of a full audio item, so about 7 MB for 40,000 tracks, much less gzipped. That's comparable to the legacy `/files` listing the iOS app downloads today.
+  - **Size (estimated):** about 180 bytes per item before gzip (the example above), roughly a quarter of a full audio item, so about 7 MB for 40,000 tracks, much less gzipped. That's comparable to the Sync server's `/files` listing the iOS app downloads today.
 - **No deltas, cursors or tombstones.** Removals, moves, folder deletes and files added then removed between syncs all fall out of the client's comparison. The server keeps no change history.
 - **Scans never publish a guess.** A removal reaches clients only when the server has positively seen that a file is gone:
   - **Unavailable shared folders.** When a folder is added, the server records the identity of the volume it lives on (its device ID or volume UUID). Before every scan it checks that the folder exists, is readable, and is still on that volume. An unplugged drive or unmounted network volume usually leaves an empty mount point behind on the startup disk, so the volume check, not emptiness, is what detects it. If the check fails, the folder is marked `available: false`, its last snapshot keeps being served in slice indexes (listed in `offline`), and its files' content, art and lyrics answer `503 folder_unavailable`.
@@ -341,11 +341,6 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
       - A selection is evaluated at every scan, so a companion added later (subtitles downloaded after the movie, say) is published automatically.
     Selecting a whole folder already includes all of these and everything else in it.
   - **`kind`** is chosen per slice in the desktop app, defaulting to the kind most of its files are.
-- **Legacy sync:**
-  - **What it serves.** Port 41324 still serves the one folder the Sync app shared, with paths relative to it as today. A desktop-app setting picks which slice it applies, limited to that folder, defaulting to the preset that was active at the upgrade. If the chosen slice isn't a `selection`, legacy sync uses the files it resolves to within that folder.
-  - **It's on only while pairing is off.** It has no authentication, so it would let any device bypass the pairing code. Turning pairing on turns it off (§4).
-  - **Pause covers both ports.**
-  - Otherwise its routes stay as they are, unfixed, because they're barely used now. They can be removed once older clients are gone.
 - **Slice definitions (server persistence, not part of the wire protocol).** Slices are stored in the server's settings, not in the Sync app's web storage (`localStorage`, in `state.ts`), because the server keeps running when the window is closed and the CLI needs them too. Clients never see this format.
   - **A typed syntax tree, not a query language.** A definition is a tree of typed nodes, and each node type has a fixed set of typed fields:
     - properties are named by closed enums, never by strings like `"tags.genre"`;
@@ -442,8 +437,8 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - **Migration from the Sync app.** On first launch after the upgrade, the app hands its existing presets to the server, which converts each to a slice:
     - **Paths.** The Sync app stores a preset as path strings in which a trailing `/` marks a folder. The migration is the one place that convention is read: entries ending in `/` become `folders`, the rest `files`, each split into components under the shared folder's UUID (`Jazz/` becomes `{"folder": "a41f…", "path": ["Jazz"]}`).
     - **Empty presets.** A preset with an empty selection becomes `all`, which also covers any folder shared later.
-    - **Only the active preset is published.** The other presets are migrated unpublished, and the desktop app shows them as migrated, so the user decides which ones devices should see. Before the upgrade only the active preset was listed to devices. (Raw downloads from the legacy server already ignored the selection, so this is about what's listed, not new file access.)
-- **Enforcement:** an item is served (`/content`, `/art`, `/lyrics`, signed URLs) only if it's in at least one published, available slice; otherwise it gets `404`, as if it didn't exist. Item routes aren't scoped by slice, because every client can see every published slice. Slices are enforced by the server on every route, not only in listings. (The legacy server applies its selection only to `/files`; that's left as is, since the legacy API is barely used.)
+    - **Only the active preset is published.** The other presets are migrated unpublished, and the desktop app shows them as migrated, so the user decides which ones devices should see. Before the upgrade only the active preset was listed to devices. (Raw downloads from the Sync server already ignored the selection, so this is about what's listed, not new file access.)
+- **Enforcement:** an item is served (`/content`, `/art`, `/lyrics`, signed URLs) only if it's in at least one published, available slice; otherwise it gets `404`, as if it didn't exist. Item routes aren't scoped by slice, because every client can see every published slice. Slices are enforced by the server on every route, not only in listings.
 - **Index:**
   - **Contents:** a SQLite database in the app's data directory, holding files, folders, their metadata and `rev`, and each shared folder's last snapshot. Each file is indexed once, however many slices include it.
   - **Reader version:** each indexed file records the version of the metadata reader that read it.
@@ -452,7 +447,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
     - the shared folders: UUID, path on disk, display name and volume identity;
     - slice definitions, which refer to shared folders by UUID;
     - when pairing is on, paired devices and the URL-signing key.
-  - **Why it exists:** so metadata isn't re-read on every request; the legacy `/files` walks the whole tree on every call.
+  - **Why it exists:** so metadata isn't re-read on every request; the Sync server's `/files` walks the whole tree on every call.
   - **Ready responses:** the server may also keep each slice's gzipped index response ready, rebuilt when the slice changes.
 - **Change detection:**
   - **Triggers:** file-system watching, plus a full rescan at startup and periodically.
@@ -475,14 +470,14 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - **Grace period:** the assertion is kept for a grace period after the last request, because players buffer ahead and can go quiet for a while in the middle of playback. Its length needs tuning against real buffered playback in VLCKit and AVPlayer.
   - **Optional setting:** "Keep this computer awake while sharing".
   - **Clients** show a distinct "server asleep or off" state and keep browsing from their local copy.
-- **Network visibility:** the desktop app shows "Sharing on ‹network›" and has a one-click pause covering both ports, because in open mode a laptop shares its slices with any network it joins (§9).
+- **Network visibility:** the desktop app shows "Sharing on ‹network›" and has a one-click pause, because in open mode a laptop shares its slices with any network it joins (§9).
 
 ## 9. Security in v1, and what's deferred
 
-- **Open in 1.0.** Anyone on the same network can read the published slices. That's the same exposure as the legacy Sync server, which has no auth.
+- **Open in 1.0.** Anyone on the same network can read the published slices. That's the same exposure as today's Sync server, which has no auth.
   - **The real risk is a laptop that moves:** with the server running, a MacBook on hotel or café Wi-Fi advertises itself and serves its slices to everyone there.
-  - **1.0 mitigation:** the network name, and the pause control covering both ports (§8).
-  - **1.1:** the optional pairing code (§4), which also turns off the unauthenticated legacy port.
+  - **1.0 mitigation:** the network name, and the pause control (§8).
+  - **1.1:** the optional pairing code (§4).
   - **Possible later:** remember the network chosen at setup and pause sharing on any other. Reading the Wi-Fi name on recent macOS may need Location permission (from memory, not checked).
 - **Slices are not access control.** They decide what's published, not who can see it: every client can see every published slice. A "Kids" slice hides nothing from any other device. Files outside every published slice are never served.
 - **Nothing to damage.** Because no route writes, an unwanted client can read the published files but can't change, delete or add anything, or alter another device's state.
@@ -490,7 +485,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 - **Plain HTTP.** Media, and in pairing mode the token, can be sniffed by anyone on the same LAN.
   - **Why plain:** TLS with a self-signed, pinned certificate works in URLSession through its challenge delegate, but it's unverified for VLCKit's HTTP access and for AVPlayer without a resource loader.
   - **Later:** a `tls` feature with the certificate fingerprint pinned at pairing, once VLCKit's behaviour is tested.
-- **Inside chosen folders and published slices only.** The server never exposes paths outside the shared folders or outside every published slice, filters hidden files, rejects path traversal, and never follows symlinks out of the shared folders unless the user opts in. This matters more in open mode. The legacy `/file` route skips some of these filters, so it's not a model to copy.
+- **Inside chosen folders and published slices only.** The server never exposes paths outside the shared folders or outside every published slice, filters hidden files, rejects path traversal, and never follows symlinks out of the shared folders unless the user opts in. This matters more in open mode. The Sync server's `/file` route skips some of these filters, so it's not a model to copy.
 
 ## 10. Smallest first version
 
@@ -498,7 +493,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 
 - **Server:**
   1. **A playback test first.** Build a minimal `/content` endpoint with the HTTP contract in §6. Before anything else depends on it, check that VLCKit (Matinee) and AVPlayer/URLSession (MiniMoon) play, seek, and recover from a dropped connection and a changed file, including whether each sends `If-Range` or checks the ETag across range requests.
-  2. Rename and rebrand the server; leave the legacy routes in place. Keep the bundle identifier (`com.plastaq.sync-server`) and the updater endpoint so existing installs upgrade in place. Whether the Tauri updater handles a product-name change cleanly is unverified.
+  2. Rename and rebrand the server, and remove the Sync protocol's routes. An upgraded server no longer answers older MiniMoon iOS versions, so an app version that speaks MMP has to ship before or with it; the apps own that transition. Keep the bundle identifier (`com.plastaq.sync-server`) and the updater endpoint so existing installs upgrade in place. Whether the Tauri updater handles a product-name change cleanly is unverified.
   3. `/v1/server` and Bonjour advertising, open mode only.
   4. **The index:**
      - shared folders (UUIDs, paths, names, volume identities) in the server's settings, and a SQLite index of files and metadata, with reader versions and `rev`;
@@ -510,8 +505,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
      - shared folders and their display names;
      - slices, using the existing selection tree spanning every shared folder, with companion files shown, and without the active-preset switch;
      - a published switch per slice;
-     - the legacy-sync slice setting;
-     - the sharing network and a pause covering both ports;
+     - the sharing network and a pause control;
      - read-error and metadata-error reporting, and "Reindex everything".
      Slices are stored in the server's settings in the format in §8 (`all` and `selection` only), migrating existing presets with only the active one published.
   7. **Tag reading, copied in.** Copy the reading side of `minimoon_tags` into the server (§8), and extend the copy with duration in milliseconds (the crate reports whole seconds, `properties.duration().as_secs()`) and a channel count. The apps' crate doesn't change.
@@ -531,14 +525,14 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - offline folders (never removing their items) and unavailable or disappeared slices, shown as offline, never as deleted;
   - content URLs with resumable downloads checked against `Content-Range`, and an error mapping.
 - **MiniMoon:**
-  - **iOS (copies files):** syncs from the file list (`?view=files`). It downloads added and changed files and rescans them locally, as it does today against `/files`. This replaces its legacy sync for MMP servers, with offline folders, resumable downloads and per-device slices added.
+  - **iOS (copies files):** syncs from the file list (`?view=files`). It downloads added and changed files and rescans them locally, as it does today against `/files`. This replaces its Sync-protocol client for MMP servers, with offline folders, resumable downloads and per-device slices added.
   - **macOS and tvOS (no local copy):** an MMP `LibrarySource` mapping items from the full index to `Track` rows, plus fetch-to-cache playback.
   - **Switching slice** on a device removes the files that are no longer in it from that device, through the normal comparison.
 - **Matinee:** an MMP source feeding `LibraryStore` the way a share does, filling `ProbeResult` from each item's `video` facts instead of probing, and matching streams to VLCKit tracks by `trackNumber`. It plays content URLs through VLCKit. Its existing share machinery (record keys, the state-worth-keeping rule, offline state, the title cap) applies.
 
 **Next (protocol 1.1, already designed above)**
 
-- Optional pairing code, tokens and signed URLs bound to device and generation (server setting, client pairing screen, Keychain storage), including turning the legacy port off while pairing is on.
+- Optional pairing code, tokens and signed URLs bound to device and generation (server setting, client pairing screen, Keychain storage).
 - `events` (SSE).
 - `art-resize`.
 
@@ -565,9 +559,9 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - Running Matinee's prober code over 107 real files, its VLCKit path never set a dynamic range, so MKV and share files get no HDR or Dolby Vision label. It also missed the frame rate for 5 files and reported HE-AAC parametric stereo as mono ([video-reader-test.md](video-reader-test.md)).
   - The video reader test: native Rust, ffprobe and MediaInfo agree on duration, codec, size, transfer, Dolby Vision, HDR10+ and covers for all 107 real files. All three were correct on 10 synthetic HDR clips ([video-reader-test.md](video-reader-test.md)).
   - Matinee probes each video once and caches a `ProbeResult` in a purgeable sidecar (`Playback.swift`, `LibraryStore.swift`). It holds duration, size, video codec, dynamic range, frame rate, the first audio track's codec and channels, and audio and subtitle track counts. Local MP4 and MOV files go through AVFoundation; everything else, including share files, goes through a VLCKit parse with a 10-second limit (`VLCKitProber` in `VLCKitEngine.swift`).
-  - The Sync app's selection: a tree of folders and files saved as named presets in web storage, one active at a time (`minimoon-sync/src/state.ts`). Folder node ids end in `/`. The server receives the active preset as `selected_roots` and filters `/files` by path prefix, with an empty list meaning everything (`list_files_handler`). `/file-by-path` (`download_file_query_handler`) and the deprecated `/file` don't apply it.
+  - The Sync app's selection: a tree of folders and files saved as named presets in web storage, one active at a time (`minimoon-sync/src/state.ts`). Folder node ids end in `/`. The server receives the active preset as `selected_roots` and filters `/files` by path prefix, with an empty list meaning everything (`list_files_handler`).
   - MiniMoon's iOS sync already downloads the full `/files` list and compares by library-relative path, size and mtime (`SyncService.swift`); the comparison once blocked the main actor on a large library (MINIMOON-B9).
-  - The legacy server's routes, and that it has no auth.
+  - The Sync server has no auth.
   - `lofty` reads no video fields and fails on Matroska; it reads MP4 tags and covers correctly (video reader test).
   - The tag reader's fields (`tagging/src/tag.rs`):
     - it has no movement field;
