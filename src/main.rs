@@ -1,12 +1,18 @@
+#[path = "cli/console.rs"]
+mod console;
+
 use anyhow::{bail, Context, Result};
-use minimoon_media_server::library::{LibraryOptions, SharedFolderStatus};
+use minimoon_media_server::library::{
+    IndexActivity, LibraryOptions, SharedFolderStatus, NOT_INDEXED_YET,
+};
 use minimoon_media_server::network::preferred_bind_ip;
 use minimoon_media_server::scan::ScanOptions;
 use minimoon_media_server::settings::AuthMode;
 use minimoon_media_server::{MediaServer, ServerOptions};
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing_subscriber::filter::LevelFilter;
 
 const USAGE: &str = "usage: minimoon-media-server [options] [<folder>...]
@@ -179,7 +185,7 @@ async fn main() -> Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(console::LogWriter::default))
         .with(filter)
         .init();
 
@@ -220,7 +226,9 @@ async fn main() -> Result<()> {
         bail!("no shared folders yet; pass one or more folders to share\n\n{USAGE}");
     }
 
-    let use_color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let terminal = std::io::stdout().is_terminal();
+    let use_color = terminal && std::env::var_os("NO_COLOR").is_none();
+    console::enable_progress(terminal);
     let settings = server.library().settings();
     let address = server.local_addr().await.context("not listening")?;
     let ip = if address.ip().is_unspecified() {
@@ -241,11 +249,14 @@ async fn main() -> Result<()> {
         ),
         ("Data", data_dir.display().to_string()),
     ];
-    for folder in server.library().shared_folders() {
-        rows.push((
-            "Shared folder",
-            format!("{} ({})", folder.name, folder.path.display()),
-        ));
+    let folders = server.library().shared_folders();
+    for folder in &folders {
+        let mut value = format!("{} ({})", folder.name, folder.path.display());
+        if let Some(note) = unshared_note(folder) {
+            value.push_str(" - ");
+            value.push_str(&note);
+        }
+        rows.push(("Shared folder", value));
     }
     rows.push(("Address", format!("http://{ip}:{}", address.port())));
     println!("{}", paint("MiniMoon Media Server", ANSI_BOLD, use_color));
@@ -255,61 +266,38 @@ async fn main() -> Result<()> {
     let mut pairing = server.pairing_requests();
     let report = async {
         let library = server.library();
-        tokio::task::block_in_place(|| library.wait_until_idle(Duration::from_secs(24 * 60 * 60)));
-        let folders = library.shared_folders();
-        let files: usize = folders.iter().map(|f| f.files).sum();
-        let unreadable: usize = folders.iter().map(|f| f.unreadable).sum();
-        println!(
-            "Indexed {} files{}.",
-            format_count(files),
-            if unreadable > 0 {
-                format!(" ({} with unreadable metadata)", format_count(unreadable))
+        let mut monitor = Monitor::new(&folders);
+        let mut line = console::ProgressLine::default();
+        loop {
+            // The driver can hold the library's lock for a whole batch of reads.
+            let (folders, idle) =
+                tokio::task::block_in_place(|| (library.shared_folders(), library.is_idle()));
+            let (messages, task) = monitor.update(&folders, idle);
+            for message in messages {
+                console::println(message);
+            }
+            let busy = task.is_some();
+            console::set_progress(
+                task.map(|task| line.render(&task, Instant::now(), console::width(), use_color)),
+            );
+            tokio::time::sleep(if busy || !idle {
+                Duration::from_millis(100)
             } else {
-                String::new()
-            }
-        );
-        for folder in &folders {
-            if !folder.scan_errors.is_empty() {
-                println!(
-                    "{} couldn't be read completely, so {}:",
-                    folder.name,
-                    if folder.files > 0 {
-                        "its previously published files are kept"
-                    } else {
-                        "it isn't shared yet"
-                    }
-                );
-                for error in &folder.scan_errors {
-                    println!(
-                        "  {}: {}",
-                        folder.path.join(&error.path).display(),
-                        error.message
-                    );
-                }
-                println!(
-                    "  Fix the permissions, or share it without a subfolder by running again \
-                     with --exclude <subfolder>."
-                );
-            } else if !folder.available {
-                println!(
-                    "{} is unavailable: {}",
-                    folder.name,
-                    folder.unavailable_reason.as_deref().unwrap_or("unknown")
-                );
-            }
+                Duration::from_secs(1)
+            })
+            .await;
         }
-        std::future::pending::<()>().await
     };
     let codes = async {
         while let Ok(request) = pairing.recv().await {
-            println!(
+            console::println(format!(
                 "{} {} wants to connect ({} on {}). Code: {}",
                 paint("Pairing:", ANSI_BOLD, use_color),
                 request.client_name,
                 request.app,
                 request.platform,
                 paint(&request.code, ANSI_GREEN, use_color)
-            );
+            ));
         }
     };
     tokio::select! {
@@ -317,9 +305,175 @@ async fn main() -> Result<()> {
         _ = report => {}
         _ = codes => {}
     }
+    console::set_progress(None);
     server.shutdown().await;
     println!("Stopped sharing.");
     Ok(())
+}
+
+/// Why a shared folder isn't being served, or `None` when it is.
+fn unshared_note(folder: &SharedFolderStatus) -> Option<String> {
+    if folder.available {
+        return None;
+    }
+    let reason = folder.unavailable_reason.as_deref();
+    Some(match (folder.indexed, reason) {
+        (false, None | Some(NOT_INDEXED_YET)) => "not shared until it's indexed".into(),
+        (false, Some(reason)) => format!("not shared: {reason}"),
+        (true, reason) => format!(
+            "offline, so its files can't be played: {}",
+            reason.unwrap_or("unknown")
+        ),
+    })
+}
+
+/// Turns the library's folder states into messages and the progress line.
+struct Monitor {
+    /// Why each folder isn't shared, as last reported (`None` while it's shared).
+    notes: HashMap<uuid::Uuid, Option<String>>,
+    /// Whether the summary after the first indexing has been printed.
+    summarized: bool,
+}
+
+impl Monitor {
+    fn new(folders: &[SharedFolderStatus]) -> Self {
+        Self {
+            notes: folders.iter().map(|f| (f.id, unshared_note(f))).collect(),
+            summarized: false,
+        }
+    }
+
+    fn update(
+        &mut self,
+        folders: &[SharedFolderStatus],
+        idle: bool,
+    ) -> (Vec<String>, Option<console::Task>) {
+        let mut messages = Vec::new();
+        for folder in folders {
+            let note = unshared_note(folder);
+            if self.notes.get(&folder.id) == Some(&note) {
+                continue;
+            }
+            match &note {
+                None => messages.push(format!("{} is now shared.", folder.name)),
+                Some(note) => messages.push(format!("{} is {note}.", folder.name)),
+            }
+            self.notes.insert(folder.id, note);
+        }
+        if idle && !self.summarized {
+            self.summarized = true;
+            messages.extend(summary(folders));
+        }
+        (messages, self.task(folders))
+    }
+
+    /// What the progress line shows: reads for a scan first, then listing, then re-reads for a
+    /// newer reader.
+    fn task(&self, folders: &[SharedFolderStatus]) -> Option<console::Task> {
+        let mut reading = Vec::new();
+        let (mut done, mut total) = (0, 0);
+        for folder in folders {
+            if let IndexActivity::Reading {
+                done: folder_done,
+                total: folder_total,
+            } = folder.activity
+            {
+                reading.push(folder);
+                done += folder_done;
+                total += folder_total;
+            }
+        }
+        if !reading.is_empty() {
+            let label = if reading.iter().any(|f| !f.indexed) {
+                format!("Indexing {}", names(&reading))
+            } else {
+                format!("Reading new files in {}", names(&reading))
+            };
+            return Some(console::Task {
+                label,
+                progress: Some((done, total)),
+            });
+        }
+        let listing: Vec<_> = folders
+            .iter()
+            .filter(|f| f.activity == IndexActivity::Listing)
+            .collect();
+        if !listing.is_empty() {
+            let label = if listing.iter().any(|f| !f.indexed) {
+                format!("Listing files in {}", names(&listing))
+            } else {
+                format!("Checking {} for changes", names(&listing))
+            };
+            return Some(console::Task {
+                label,
+                progress: None,
+            });
+        }
+        let updating: Vec<_> = folders.iter().filter(|f| f.outdated > 0).collect();
+        if updating.is_empty() {
+            return None;
+        }
+        let total: usize = updating
+            .iter()
+            .map(|f| f.outdated_total.max(f.outdated))
+            .sum();
+        let left: usize = updating.iter().map(|f| f.outdated).sum();
+        Some(console::Task {
+            label: format!("Updating metadata in {}", names(&updating)),
+            progress: Some((total - left, total)),
+        })
+    }
+}
+
+/// Folder names for a progress label.
+fn names(folders: &[&SharedFolderStatus]) -> String {
+    match folders {
+        [one] => one.name.clone(),
+        [a, b] => format!("{} and {}", a.name, b.name),
+        _ => format!("{} folders", folders.len()),
+    }
+}
+
+/// What the first indexing found: the file count and any folder that couldn't be read.
+fn summary(folders: &[SharedFolderStatus]) -> Vec<String> {
+    let files: usize = folders.iter().map(|f| f.files).sum();
+    let unreadable: usize = folders.iter().map(|f| f.unreadable).sum();
+    let mut lines = vec![format!(
+        "Indexed {} files{}.",
+        format_count(files),
+        if unreadable > 0 {
+            format!(" ({} with unreadable metadata)", format_count(unreadable))
+        } else {
+            String::new()
+        }
+    )];
+    for folder in folders {
+        if folder.scan_errors.is_empty() {
+            continue;
+        }
+        lines.push(format!(
+            "{} couldn't be read completely, so {}:",
+            folder.name,
+            if folder.files > 0 {
+                "its previously published files are kept"
+            } else {
+                "it isn't shared yet"
+            }
+        ));
+        for error in &folder.scan_errors {
+            lines.push(format!(
+                "  {}: {}",
+                folder.path.join(&error.path).display(),
+                error.message
+            ));
+        }
+        lines.push(
+            "  Fix the permissions, or share it without a subfolder by running again \
+             with --exclude <subfolder>."
+                .into(),
+        );
+    }
+    lines
 }
 
 fn format_count(count: usize) -> String {
@@ -418,6 +572,135 @@ mod tests {
         assert!(parse_args(args(&["--port"])).is_err());
         assert!(parse_args(args(&["--port", "x"])).is_err());
         assert!(parse_args(args(&["/definitely/not/a/folder"])).is_err());
+    }
+
+    fn folder(name: &str) -> SharedFolderStatus {
+        SharedFolderStatus {
+            id: uuid::Uuid::new_v4(),
+            name: name.into(),
+            path: PathBuf::from("/m"),
+            available: true,
+            unavailable_reason: None,
+            indexed: true,
+            scanning: false,
+            activity: IndexActivity::Idle,
+            outdated: 0,
+            outdated_total: 0,
+            scan_errors: Vec::new(),
+            failed_scans: 0,
+            excluded: Vec::new(),
+            files: 0,
+            temporary_failures: 0,
+            unreadable: 0,
+        }
+    }
+
+    #[test]
+    fn says_why_a_folder_is_not_shared() {
+        let shared = folder("Music");
+        assert_eq!(unshared_note(&shared), None);
+        let new = SharedFolderStatus {
+            available: false,
+            indexed: false,
+            unavailable_reason: Some(NOT_INDEXED_YET.into()),
+            ..folder("Music")
+        };
+        assert_eq!(
+            unshared_note(&new).as_deref(),
+            Some("not shared until it's indexed")
+        );
+        let unplugged = SharedFolderStatus {
+            unavailable_reason: Some("the drive isn't mounted".into()),
+            ..new.clone()
+        };
+        assert_eq!(
+            unshared_note(&unplugged).as_deref(),
+            Some("not shared: the drive isn't mounted")
+        );
+        let offline = SharedFolderStatus {
+            indexed: true,
+            ..unplugged
+        };
+        assert_eq!(
+            unshared_note(&offline).as_deref(),
+            Some("offline, so its files can't be played: the drive isn't mounted")
+        );
+    }
+
+    #[test]
+    fn reports_a_first_index_until_the_folder_is_shared() {
+        let mut music = SharedFolderStatus {
+            available: false,
+            indexed: false,
+            unavailable_reason: Some(NOT_INDEXED_YET.into()),
+            activity: IndexActivity::Listing,
+            ..folder("Music")
+        };
+        let mut monitor = Monitor::new(std::slice::from_ref(&music));
+        let (messages, task) = monitor.update(std::slice::from_ref(&music), false);
+        assert!(messages.is_empty());
+        assert_eq!(task.unwrap().label, "Listing files in Music");
+
+        music.activity = IndexActivity::Reading {
+            done: 10,
+            total: 40,
+        };
+        let (_, task) = monitor.update(std::slice::from_ref(&music), false);
+        let task = task.unwrap();
+        assert_eq!(task.label, "Indexing Music");
+        assert_eq!(task.progress, Some((10, 40)));
+
+        music = SharedFolderStatus {
+            files: 1234,
+            ..folder("Music")
+        };
+        let (messages, task) = monitor.update(std::slice::from_ref(&music), true);
+        assert_eq!(
+            messages,
+            vec!["Music is now shared.", "Indexed 1,234 files."]
+        );
+        assert_eq!(task, None);
+        let (messages, _) = monitor.update(std::slice::from_ref(&music), true);
+        assert!(messages.is_empty(), "the summary is printed once");
+    }
+
+    #[test]
+    fn says_when_a_folder_being_indexed_loses_its_volume() {
+        let mut music = SharedFolderStatus {
+            available: false,
+            indexed: false,
+            unavailable_reason: Some(NOT_INDEXED_YET.into()),
+            ..folder("Music")
+        };
+        let mut monitor = Monitor::new(std::slice::from_ref(&music));
+        music.unavailable_reason = Some("the drive isn't mounted".into());
+        let (messages, _) = monitor.update(std::slice::from_ref(&music), false);
+        assert_eq!(
+            messages,
+            vec!["Music is not shared: the drive isn't mounted."]
+        );
+        let (messages, _) = monitor.update(std::slice::from_ref(&music), false);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn shows_metadata_updates_against_the_count_at_the_start() {
+        let mut music = SharedFolderStatus {
+            outdated: 1000,
+            outdated_total: 1000,
+            ..folder("Music")
+        };
+        let mut monitor = Monitor::new(std::slice::from_ref(&music));
+        let (_, task) = monitor.update(std::slice::from_ref(&music), false);
+        let task = task.unwrap();
+        assert_eq!(task.label, "Updating metadata in Music");
+        assert_eq!(task.progress, Some((0, 1000)));
+        music.outdated = 744;
+        let (_, task) = monitor.update(std::slice::from_ref(&music), false);
+        assert_eq!(task.unwrap().progress, Some((256, 1000)));
+        music.outdated = 0;
+        let (_, task) = monitor.update(std::slice::from_ref(&music), true);
+        assert_eq!(task, None);
     }
 
     #[test]

@@ -363,3 +363,65 @@ fn a_write_whose_mtime_goes_back_bumps_rev() {
     });
     assert_ne!(item(&index, "Album/01.flac").unwrap()["rev"], 0);
 }
+
+#[test]
+fn a_metadata_re_read_reports_its_progress_against_the_count_at_the_start() {
+    const FILES: usize = 600;
+    /// The library's background batch size.
+    const BATCH: usize = 256;
+    let media = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    for n in 0..FILES {
+        fs::write(
+            media.path().join(format!("{n:03}.flac")),
+            b"not really flac",
+        )
+        .unwrap();
+    }
+    let library = Library::start(options(data.path())).unwrap();
+    library.add_shared_folder(media.path(), None).unwrap();
+    assert!(library.wait_until_idle(WAIT));
+    let status = &library.shared_folders()[0];
+    assert_eq!((status.outdated, status.outdated_total), (0, 0));
+
+    // A second reindex once the first has re-read a batch makes every file outdated again: the
+    // count starts over rather than carrying on from where the first one had got to. Only a
+    // batch already being read can still land after it.
+    library.reindex_everything().unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let outdated = library.shared_folders()[0].outdated;
+        if outdated > 0 && outdated <= FILES - BATCH {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no batch was re-read");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    library.reindex_everything().unwrap();
+    let mut last = FILES;
+    let mut total = None;
+    loop {
+        let idle = library.is_idle();
+        let status = &library.shared_folders()[0];
+        if status.outdated > 0 {
+            assert!(
+                status.outdated_total >= FILES - BATCH,
+                "{}",
+                status.outdated_total
+            );
+            assert_eq!(
+                *total.get_or_insert(status.outdated_total),
+                status.outdated_total
+            );
+            assert!(status.outdated <= last, "{} after {last}", status.outdated);
+            last = status.outdated;
+        }
+        if idle {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the re-read never finished");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let status = &library.shared_folders()[0];
+    assert_eq!((status.outdated, status.outdated_total), (0, 0));
+}

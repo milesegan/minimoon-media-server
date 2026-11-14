@@ -30,8 +30,10 @@ cargo run --release -- ~/Music ~/Movies
 
 Folders given on the command line are added to the saved shared folders, so later runs need no
 arguments. On a fresh install the server publishes one slice, "Everything". The server prints a
-summary, then a line once the first scan has indexed everything, and a pairing code whenever a
-device asks to pair.
+summary that marks any shared folder it isn't serving yet: a folder is shared only once its first
+index is complete. In a terminal, a progress bar shows indexing and background metadata updates.
+The server then prints a line when a folder becomes shared or goes offline, a line once the first
+scan has indexed everything, and a pairing code whenever a device asks to pair.
 
 Options:
 

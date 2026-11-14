@@ -135,7 +135,18 @@ pub struct SharedFolderStatus {
     pub available: bool,
     /// Why it's unavailable, when it is.
     pub unavailable_reason: Option<String>,
+    /// Indexed at least once. Until then nothing in it is published.
+    pub indexed: bool,
     pub scanning: bool,
+    /// What the current scan is doing.
+    pub activity: IndexActivity,
+    /// Files still published with metadata from an older reader, waiting to be re-read in the
+    /// background. Approximate while a re-read is under way (a scan may re-read some of them
+    /// first); 0 while the folder's volume is missing.
+    pub outdated: usize,
+    /// How many files were outdated when the current re-read started, for progress displays; 0
+    /// when none is under way.
+    pub outdated_total: usize,
     /// Folders or files the last scan couldn't read; the folder's previous snapshot is kept.
     pub scan_errors: Vec<ScanError>,
     /// Consecutive scans that failed with errors.
@@ -146,6 +157,21 @@ pub struct SharedFolderStatus {
     pub temporary_failures: usize,
     pub unreadable: usize,
 }
+
+/// What a shared folder's scan is doing, for progress displays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IndexActivity {
+    #[default]
+    Idle,
+    /// Listing files: names, sizes and modification dates.
+    Listing,
+    /// Reading the metadata of new and changed files. Nothing the scan found is published until
+    /// every read is done.
+    Reading { done: usize, total: usize },
+}
+
+/// The reason a folder that has never been indexed is unavailable, when its volume is fine.
+pub const NOT_INDEXED_YET: &str = "not scanned yet";
 
 /// A slice, for the desktop app.
 #[derive(Clone, Debug, PartialEq)]
@@ -279,6 +305,8 @@ struct Plan {
     scanned: Vec<scan::ScannedFile>,
     removed: Vec<String>,
     pending: HashSet<u64>,
+    /// How many files the plan reads.
+    reads: usize,
     results: HashMap<String, FileRecord>,
     bumped: bool,
 }
@@ -305,6 +333,10 @@ struct FolderState {
     background: HashSet<u64>,
     /// Finished background reads: the path, the new record, and the record it was read from.
     background_results: Vec<(String, FileRecord, FileRecord)>,
+    /// Files read by an older reader, counted when the current background batch started.
+    outdated: usize,
+    /// `outdated` when the current re-read started.
+    outdated_total: usize,
 }
 
 impl FolderState {
@@ -324,6 +356,8 @@ impl FolderState {
             pending_writes: HashSet::new(),
             background: HashSet::new(),
             background_results: Vec::new(),
+            outdated: 0,
+            outdated_total: 0,
         }
     }
 
@@ -767,6 +801,7 @@ impl Core {
             scanned: result.files,
             removed,
             pending: HashSet::new(),
+            reads: to_read.len(),
             results: HashMap::new(),
             bumped: !bumps.is_empty(),
         };
@@ -1004,18 +1039,44 @@ impl Core {
         let Some(snapshot) = &state.snapshot else {
             return;
         };
-        let wanted: Vec<(String, FileRecord, Reader)> = snapshot
-            .iter()
-            .filter_map(|(path, record)| {
-                let reader = file_type(scan::split_name(path)).reader?;
-                let due = match record.status {
-                    ReadStatus::Temporary { retry_at_ms, .. } => retry_at_ms <= now,
-                    _ => record.reader_version < reader_version(Some(reader)),
+        // Outdated files are counted for progress displays. A full count walks the whole
+        // snapshot, so it's taken only when no re-read is under way; during one, each batch
+        // stops once it's full and `finish_background` subtracts what it read. A pass that
+        // finishes without filling a batch has seen every file, so its count is exact.
+        let counting = state.outdated == 0;
+        let mut complete = true;
+        let mut outdated = 0;
+        let mut wanted: Vec<(String, FileRecord, Reader)> = Vec::new();
+        for (path, record) in snapshot {
+            if wanted.len() == BACKGROUND_BATCH && !counting {
+                complete = false;
+                break;
+            }
+            let Some(reader) = file_type(scan::split_name(path)).reader else {
+                continue;
+            };
+            let due = match record.status {
+                ReadStatus::Temporary { retry_at_ms, .. } => retry_at_ms <= now,
+                _ => {
+                    let old = record.reader_version < reader_version(Some(reader));
+                    outdated += usize::from(old);
+                    old
+                }
+            };
+            if due && wanted.len() < BACKGROUND_BATCH {
+                wanted.push((path.clone(), record.clone(), reader));
+            }
+        }
+        if complete {
+            if let Some(state) = self.folders.get_mut(&id) {
+                state.outdated = outdated;
+                state.outdated_total = if outdated == 0 {
+                    0
+                } else {
+                    state.outdated_total.max(outdated)
                 };
-                due.then(|| (path.clone(), record.clone(), reader))
-            })
-            .take(BACKGROUND_BATCH)
-            .collect();
+            }
+        }
         for (path, record, reader) in wanted {
             let job_id = self.next_id();
             self.queue.push(
@@ -1050,6 +1111,10 @@ impl Core {
             return;
         };
         let results = std::mem::take(&mut state.background_results);
+        // Re-read either here or, if a scan replaced the record meanwhile, by that scan.
+        state.outdated = state
+            .outdated
+            .saturating_sub(results.iter().filter(|r| was_outdated(r)).count());
         let Some(snapshot) = state.snapshot.as_mut() else {
             return;
         };
@@ -1124,9 +1189,32 @@ impl Core {
             path: folder.path.clone(),
             available: state.is_some_and(|s| s.volume_ok && s.snapshot.is_some()),
             unavailable_reason: state.and_then(|s| s.unavailable.clone()).or_else(|| {
-                (state.is_some_and(|s| s.snapshot.is_none())).then(|| "not scanned yet".to_string())
+                (state.is_some_and(|s| s.snapshot.is_none())).then(|| NOT_INDEXED_YET.to_string())
             }),
+            indexed: snapshot.is_some(),
             scanning: state.is_some_and(|s| !s.idle()),
+            activity: match state.map(|s| &s.phase) {
+                None | Some(Phase::Idle) => IndexActivity::Idle,
+                Some(Phase::Walking { .. }) => IndexActivity::Listing,
+                Some(Phase::Reading(plan)) => IndexActivity::Reading {
+                    done: plan.reads - plan.pending.len(),
+                    total: plan.reads,
+                },
+            },
+            // Nothing is re-read while the folder's volume is missing, so nothing is reported.
+            outdated: state.filter(|s| s.volume_ok).map_or(0, |s| {
+                // Reads finished in the current batch count as done, though they're published
+                // only once the whole batch is.
+                let read = s
+                    .background_results
+                    .iter()
+                    .filter(|r| was_outdated(r))
+                    .count();
+                s.outdated.saturating_sub(read)
+            }),
+            outdated_total: state
+                .filter(|s| s.volume_ok)
+                .map_or(0, |s| s.outdated_total),
             scan_errors: state.map(|s| s.scan_errors.clone()).unwrap_or_default(),
             failed_scans: state.map_or(0, |s| s.failures),
             excluded: folder.excluded.clone(),
@@ -1135,6 +1223,12 @@ impl Core {
             unreadable,
         }
     }
+}
+
+/// Whether a finished background read was for a reader upgrade, not a retry: a record that
+/// wasn't a temporary failure was only re-read because its reader was outdated.
+fn was_outdated((_, _, original): &(String, FileRecord, FileRecord)) -> bool {
+    !matches!(original.status, ReadStatus::Temporary { .. })
 }
 
 impl FolderState {
@@ -1496,6 +1590,9 @@ impl Library {
         let mut core = self.lock();
         core.store.reset_reader_versions()?;
         for state in core.folders.values_mut() {
+            // Every file is outdated now: the next batch takes a full count.
+            state.outdated = 0;
+            state.outdated_total = 0;
             if let Some(snapshot) = &mut state.snapshot {
                 for record in snapshot.values_mut() {
                     record.reader_version = 0;
@@ -1650,28 +1747,29 @@ impl Library {
         Ok(ids)
     }
 
-    /// Waits until no scan is running or due and nothing is being read (for tests and the CLI's
-    /// first summary). A folder whose last scan failed and whose next scan is only the delayed
-    /// retry counts as settled: the caller needs to hear about the errors now. Returns false on
-    /// timeout.
+    /// Whether no scan is running or due and nothing is being read. A folder whose last scan
+    /// failed and whose next scan is only the delayed retry counts as settled: the caller needs
+    /// to hear about the errors now.
+    pub fn is_idle(&self) -> bool {
+        let core = self.lock();
+        let now = Instant::now();
+        !core.publish_due
+            && core.jobs.is_empty()
+            && core.folders.values().all(|state| {
+                let retry_only = state.failures > 0
+                    && state.scan_due.is_some_and(|due| due > now + DEBOUNCE_CAP);
+                state.idle()
+                    && state.background.is_empty()
+                    && (state.scan_due.is_none() || !state.volume_ok || retry_only)
+            })
+    }
+
+    /// Waits until [`is_idle`](Self::is_idle) (for tests). Returns false on timeout.
     pub fn wait_until_idle(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            {
-                let core = self.lock();
-                let now = Instant::now();
-                let idle = !core.publish_due
-                    && core.jobs.is_empty()
-                    && core.folders.values().all(|state| {
-                        let retry_only = state.failures > 0
-                            && state.scan_due.is_some_and(|due| due > now + DEBOUNCE_CAP);
-                        state.idle()
-                            && state.background.is_empty()
-                            && (state.scan_due.is_none() || !state.volume_ok || retry_only)
-                    });
-                if idle {
-                    return true;
-                }
+            if self.is_idle() {
+                return true;
             }
             if Instant::now() >= deadline {
                 return false;
