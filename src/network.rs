@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 #[cfg(unix)]
 use std::{cmp::Reverse, ffi::CStr, ptr};
 
-const LISTEN_PORT: u16 = 41324;
+const LISTEN_PORT: u16 = 41325;
 
 pub fn listen_port() -> u16 {
     LISTEN_PORT

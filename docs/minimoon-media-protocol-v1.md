@@ -1,6 +1,6 @@
 # MiniMoon Media Protocol (MMP) v1: proposal
 
-Status: proposal, revised 2026-11-14 after review. Nothing is built.
+Status: revised 2026-11-14. The server side of protocols 1.0 and 1.1 is built in this repository (§10 lists what's done and what isn't). The shared client package and the apps' support aren't built.
 
 - **Server:** minimoon-media-server, the renamed minimoon-sync.
 - **Clients:** MiniMoon (macOS, iOS, tvOS) and Matinee (tvOS, macOS).
@@ -203,7 +203,9 @@ There is one household and no user accounts. Every client that can reach the ser
 
 - **Item:** required `id`, `sharedFolderId`, `parentId` (the folder containing it), `name`, `path`, `kind`, `size`, `mtime`, `rev`. `mime`, `audio`, `video` and `tags` appear when known.
 - **`rev`** (non-negative integer, 0 for most files) is a content revision for changes that size and mtime don't show. Some taggers rewrite a file in place, keep its size and put the old mtime back.
-  - **Detected from file-system events, not from metadata.** The server's file watcher (§8, change detection) reports a write to a file even when its mtime is set back afterwards: FSEvents `ItemModified` on macOS, `IN_MODIFY`/`IN_CLOSE_WRITE` with inotify on Linux, a last-write change from `ReadDirectoryChangesW` on Windows. When a write event arrives for a file whose size and mtime then match the index, the server bumps its `rev`. It never infers a change by comparing metadata, which can't tell changed bytes from a changed reader or a failed read.
+  - **Detected from file-system events, not from metadata.** The server's file watcher (§8, change detection) reports a write to a file even when its mtime is set back afterwards: FSEvents `ItemModified` on macOS, `IN_MODIFY`/`IN_CLOSE_WRITE` with inotify on Linux, a last-write change from `ReadDirectoryChangesW` on Windows. When a write event arrives for a file whose size and mtime then match the index, and whose ctime has moved since the index recorded it, the server bumps its `rev`. It never infers a change by comparing metadata, which can't tell changed bytes from a changed reader or a failed read.
+  - **Why the ctime check.** FSEvents can repeat a file's `ItemModified` flag in later events for the same file, and a write's event can arrive after the scan that already saw its new mtime. Either would bump `rev` for content clients already have. The ctime advances on every write and attribute change and no program can set it back, so a write event counts only if the ctime moved. The index keeps the ctime from the last time the file's content was read, not refreshed on attribute-only changes, so a replayed write still finds it moved. The cost is an occasional extra bump when a repeated write flag comes with a later attribute change, which costs one download. Windows has no ctime in the standard library, so there the event alone decides.
+  - **A write a scan caught midway.** If a scan lands while a long write is under way, it records the temporary mtime; when the tagger then puts the old mtime back, the file's size and mtime can return to values clients already hold for the old bytes. So a file whose content changed but whose mtime didn't move forward also gets a new `rev`.
   - **Never reused.** A bump takes the next value of a server-wide counter, and both the counter and each file's bumped `rev` are kept in the server's settings, not in the index (§8). An index rebuild therefore gives every file the same `rev` as before, so changed content can't look like a client's old copy. Bumps are rare, so this list stays small; entries for files that no longer exist are pruned.
   - **What it drives:** it's part of the content ETag (§6), so downloads, `If-Range` and the art cache all see the change, and clients redownload media when it changes.
   - **Limits (best effort):** events the watcher never sees are missed:
@@ -241,7 +243,7 @@ There is one household and no user accounts. Every client that can reach the ser
   - **Booleans:** `compilation`, `hasLyrics`, `hasEmbeddedArt`. These three are always present in `tags` when `tags` is.
   - **Values are as read.** Text exactly as the file holds it (trimmed, as the reader does), nothing split or normalized; numbers as numbers; ReplayGain as the file's own text, such as `"-6.20 dB"`.
   - **`year` and `dateYear`.** The reader has two sources: `year` is the file's year field, and `dateYear` is the year of its recording-date field. Both are sent when present, and clients choose between them as the apps do today.
-  - **`rating`** is the number the file holds, on that format's own scale: 0–100 for an MP4 `rate` atom, 0–255 for a Vorbis comment `RATING` (as MiniMoon writes it). The scale for ID3 `POPM` as the reader reports it is to be confirmed by the comparison test (§11). Clients know the format from `mime` and keep their own ratings locally.
+  - **`rating`** is the number the file holds, on that format's own scale: 0–100 for an MP4 `rate` atom, 0–255 for a Vorbis comment `RATING` (as MiniMoon writes it). ID3 files never have a `rating`: `lofty` presents a `POPM` frame as `email|stars|counter` text, which the reader's number parse rejects, so the apps' reader reports none either (§11). Clients know the format from `mime` and keep their own ratings locally.
   - **No `movement` in v1.** The tag reader has no movement field. It can be added, with the reader, as an additive change.
   - **Lyrics** text is fetched separately (§6).
   - **Mapping:** the server maps its tag reader's fields onto this schema. Adding a field is an additive change.
@@ -287,7 +289,7 @@ There is one household and no user accounts. Every client that can reach the ser
     - the first audio stream's codec and channels;
     - audio and subtitle stream counts.
     Matinee fills `ProbeResult` from the index and skips its own VLCKit probe. That probe costs a network parse of up to 10 seconds per share file today, repeated after every tvOS cache purge. Per-track language and default/forced flags, together with `trackNumber`, also let it apply audio and subtitle language preferences before playback.
-  - **Unreadable files:** a file whose metadata can't be read is still listed and served, with only the required fields. Matinee falls back to probing it with VLCKit as today.
+  - **Unreadable files:** a file whose metadata can't be read is still listed and served, with only the required fields and `mime` (which comes from the extension). Matinee falls back to probing it with VLCKit as today.
 - **Identity:**
   - **`id`** is a hash of the shared folder's `id` and the item's `path`. It survives server index rebuilds, is the same in every slice, and changes only when the file is moved or renamed on disk. Renaming a shared folder's display name changes nothing. Used in content, art and lyrics URLs.
   - **Clients key their on-device state by facts they already use, scoped to the server's `id`,** so two servers with the same paths never collide:
@@ -304,7 +306,7 @@ There is one household and no user accounts. Every client that can reach the ser
   - **No content coding.** Media is always sent as the file's own bytes, never with `Content-Encoding`, so each file has one representation and one ETag.
   - **ETag:** built from exactly the facts clients compare in the index, `size`, `mtime` in milliseconds and `rev` (`"<size>-<mtime ms>-<rev>"`, §5). Using the index's precision means the ETag and a client's download decision can't disagree about whether a file changed. It's declared strong (RFC 9110 §8.8.1) on the assumption that any change to a file's bytes changes its size, its mtime to the millisecond, or its `rev`. That assumption breaks when the watcher misses an mtime-preserving write (§5, `rev` limits), or when two same-size writes land within one millisecond. A strong ETag is needed because RFC 9110 §13.1.5 forbids clients from sending a weak one in `If-Range`.
   - **Ranges:** a single range per request, in any of the three forms (`bytes=a-b`, `bytes=a-`, `bytes=-n`), answered with `206` and `Content-Range`. A request for several ranges gets the whole file with `200`, which RFC 9110 allows (§14.2). A range starting past the end gets `416` with `Content-Range: bytes */<size>`.
-  - **Conditional requests:** `If-Range` with the ETag (a stale ETag gets the whole file with `200`), and `If-None-Match` (`304`).
+  - **Conditional requests:** `If-Range` with the ETag (a stale ETag gets the whole file with `200`), and `If-None-Match` (`304`). A date in `If-Range` gets the whole file, and `If-Modified-Since` is ignored, because neither can see a change that kept the mtime.
   - **HEAD** returns the same headers as GET, with no body.
   - **Files that change mid-transfer (best effort).** With `Content-Length`, a response is complete as soon as its last byte arrives (RFC 9112 §6.3), so closing the connection afterwards can't make the client reject it. The check therefore comes before the last byte:
     - the server records the file's size and mtime (at full precision) when a response starts;
@@ -317,7 +319,7 @@ There is one household and no user accounts. Every client that can reach the ser
     - **`200`:** the file changed in the meantime, or the server ignored the range. The client discards its partial copy and writes the body from the start, checking it against `Content-Length`.
   - **MiniMoon:** downloads to its cache, checks the finished file's length as above, then opens it with `AVAudioFile`.
   - **Matinee:** hands VLCKit the URL and streams directly. Whether VLCKit's HTTP access plays, seeks and recovers correctly against this server is the first thing to test once a prototype server exists (§10).
-- **Embedded artwork:** `GET /v1/items/{id}/art` returns the first embedded picture, or `404`. For video, that's a Matroska cover attachment or the MP4 `covr` atom. Same headers and conditional-request rules as content.
+- **Embedded artwork:** `GET /v1/items/{id}/art` returns the first embedded picture, or `404`. For video, that's a Matroska cover attachment or the MP4 `covr` atom. For an `image` item it's the image itself. Same headers and conditional-request rules as content.
 - **Resized images** (`art-resize` feature): `?maxSize=600` scales either an item's embedded art or an `image` item's content to fit within 600 pixels, as JPEG. Results are cached in the server's app-data directory, never next to the media. The cache key is the item `id`, its content ETag, the requested `maxSize` and the resizer's version number, so a changed source, a different size or an improved resizer each produce a new entry.
 - **Embedded lyrics:** `GET /v1/items/{id}/lyrics` returns `text/plain`.
 
@@ -471,7 +473,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 - **Tag reading: a copy, not a dependency.**
   - **What's copied.** The server doesn't depend on the apps' `minimoon_tags` crate. It carries a copy of only the reading side: `read_tag` and its helpers, the native-text and sort-tag reading, and embedded-picture reading. The crate's writing and tag-copying code, and its C interface for Swift, stay out.
   - **Why.** The crate is a thin layer over `lofty`, so the copy is small. The server avoids building the apps' static library and its Swift-facing interface, and it doesn't carry write code it must never call (§2, read-only).
-  - **`lofty` version.** The crate pins `lofty` to a git revision for an ID3v2 write fix. The read-only copy can use a crates.io release, after checking that it reads a sample library the same as the pinned revision.
+  - **`lofty` version.** The crate pins `lofty` to a git revision for an ID3v2 write fix. The read-only copy uses the crates.io release 0.25.5. It read 1,011 sample files identically to the pinned revision (§11).
   - **Keeping them aligned.** Advantage 3 (§1) depends on the server and the apps reading tags the same way, and a copy can drift. A comparison test runs both readers over the same sample files and fails on any difference in the fields MMP sends. When the apps' reader changes, the copy is updated and its reader version (§8, index) is bumped, so existing files are re-read.
 - **Reading metadata safely:**
   - a failure to read a file's metadata never stops the file being listed or served (§5);
@@ -501,6 +503,11 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 
 ## 10. Smallest first version
 
+**Where the server stands (2026-11-14).** Steps 2–5, 7 and 8 below are built, and so is the server side of protocol 1.1 (pairing, signed URLs, `events`, `art-resize`):
+- **Not done:** step 1, the playback test, needs Matinee and MiniMoon builds that speak MMP. Step 6 belongs to the desktop app (`minimoon-sync`), which still embeds the old server: the server exposes what that UI needs (shared folders, slices, companion previews, preset migration, pausing, pairing and devices, error counts, "Reindex everything") but nothing calls it yet.
+- **Tested:** on macOS only. The Windows code paths were type-checked, and the Linux ones through an Android target that shares them; neither was built or run on its own platform.
+- **Additions beyond the steps:** the ctime check on `rev` bumps (§5), and an idle-sleep assertion while content streams (§8).
+
 **Core (protocol 1.0)**
 
 - **Server:**
@@ -526,7 +533,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
      - **Crates:** `matroska-demuxer`, `mp4-atom`, `scuffle-h265`, `h264-reader`, `scuffle-av1`, and `lofty` for MP4 tags.
      - **Hand-written parsing:** about 240 lines, covering the Dolby Vision configuration record, Matroska attachment headers, raw EBML and MP4 box scanning (`mp4-atom` drops `dvcC`/`dvvC`), and the HDR10+ SEI check.
      - **Results:** on 107 real files, it agreed with ffprobe and MediaInfo on duration, codec, size, transfer, Dolby Vision, HDR10+ and covers for every file. The tools differed on frame rate, channel count, language and title for some files, as listed in the report. On 10 synthetic HDR clips it detected every HDR10, HLG, HDR10+ and Dolby Vision 5 and 8.1 case, but didn't read the MP4 forced flag. It ran in a median of 19 ms and read a median of 100 KB per file. ffprobe read 5 MB per file and would need a custom LGPL build; MediaInfoLib is an 8 MB C++ library needing FFI. The test is not comprehensive format validation; its gaps are listed in the report and in §11.
-     - **Still to do:** read MP4 forced and default flags and track titles; report HE-AAC parametric stereo as 2 channels; add `trackNumber`.
+     - **Done since the test:** MP4 forced flags (ffmpeg's `kind` box), default flags and track titles (`udta/name`); HE-AAC with SBR reported as 2 channels unless its config rules parametric stereo out; `trackNumber` on every stream. On the same 117 files nothing regressed, the three HE-AAC trailers now agree with ffprobe, and the synthetic MP4s' forced flags are 10/10.
      - **Placement:** in the server, next to the copied tag reader.
 - **Shared Swift client package:** used by both MiniMoon and Matinee, as a new Swift package with its own repo, since Matinee and MiniMoon are separate repos. It covers:
   - discovery (`NWBrowser`);
@@ -543,7 +550,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - **Switching slice** on a device removes the files that are no longer in it from that device, through the normal comparison.
 - **Matinee:** an MMP source feeding `LibraryStore` the way a share does, filling `ProbeResult` from each item's `video` facts instead of probing, and matching streams to VLCKit tracks by `trackNumber`. It plays content URLs through VLCKit. Its existing share machinery (record keys, the state-worth-keeping rule, offline state, the title cap) applies.
 
-**Next (protocol 1.1, already designed above)**
+**Next (protocol 1.1, already designed above; the server side is built)**
 
 - Optional pairing code, tokens and signed URLs bound to device and generation (server setting, client pairing screen, Keychain storage).
 - `events` (SSE).
@@ -584,10 +591,17 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - RFC 9110 §15.5.22: a `426` response must carry an `Upgrade` header.
   - RFC 9110 §13.1.5: clients must not send a weak ETag in `If-Range`.
   - RFC 9110 §8.8.3.3: a strong ETag for a gzip-encoded representation has to differ from the unencoded one's.
-- **Crates:**
-  - `notify` 8.2.2 (from its source): watches inotify `CLOSE_WRITE` and `ATTRIB`, reports `IN_Q_OVERFLOW` and dropped FSEvents as `Rescan`, adds a watch per subdirectory for recursion, and subscribes to file-level FSEvents. Its FSEvents stream starts at `kFSEventStreamEventIdSinceNow`, with no way to pass a starting event id.
   - RFC 9110 §14.2: a server may ignore a request for several ranges.
   - RFC 9112 §6.3: with `Content-Length`, a message is incomplete only if the connection closes before that many bytes arrive, so closing afterwards doesn't make a complete response fail.
+- **Crates:**
+  - `notify` 8.2.2 (from its source): watches inotify `CLOSE_WRITE` and `ATTRIB`, reports `IN_Q_OVERFLOW` and dropped FSEvents as `Rescan`, adds a watch per subdirectory for recursion, and subscribes to file-level FSEvents. Its FSEvents stream starts at `kFSEventStreamEventIdSinceNow`, with no way to pass a starting event id.
+- **The server build (tests in `tests/`, run on macOS 27 on APFS):**
+  - An in-place write that restores the file's mtime is reported by FSEvents as `ItemModified` and bumps `rev`. A write made while the server is stopped is replayed from the stored event id and bumps `rev` after the restart. FSEvents repeated a file's write flag in a later event, which bumped `rev` twice until the ctime check was added.
+  - A transfer of a file written mid-transfer (mtime restored) is cut short before its last chunk. Revoking a device closes its open download.
+  - The `rev` counter, ids and `rev` values survive a restart and an index rebuild. A folder on an unmounted volume keeps serving its last snapshot and is listed in `offline`. A scan error publishes nothing until the user excludes the unreadable subfolder.
+  - The copied tag reader on crates.io `lofty` 0.25.5 read 1,011 sample files (MP3, WAV, M4A, AIFF, FLAC, MPC, APE, Ogg, WavPack, Opus, Speex) identically to the apps' crate on its pinned revision.
+  - Neither reader reports a rating for an ID3 `POPM` frame: `lofty` presents it as `email|stars|counter` text. Neither finds ID3 lyrics: `lofty` maps `USLT` to `ItemKey::UnsyncLyrics`, and the apps' reader reads only `ItemKey::Lyrics`. Both are gaps in the apps' reader, which the copy matches.
+  - A first scan of 29,722 local files (107 videos and Logic Pro's sample library) took about 5 seconds. That slice's index is 13.4 MB, 1.1 MB gzipped.
 - **Apple and competitors:**
   - **Local network privacy:** tvOS doesn't have it (TN3179).
   - **Plex:** remote playback of personal video needs Plex Pass or a Remote Watch Pass since April 2025, enforced in stages. Local playback is unaffected.
@@ -602,7 +616,6 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 - What users actually use Sync app presets for. Publishing only the active preset at migration keeps today's listing; anyone who switched presets to change what every device sees now does that per device instead.
 - Index size and the time to parse and compare it on an Apple TV for a 100,000-track library (only estimated).
 - VLCKit and AVPlayer playback, seeking and recovery against this server's HTTP contract (the first step in §10), including whether either sends `If-Range` or checks the ETag across range requests.
-- The scale of an ID3 `POPM` rating as the tag reader reports it.
 - Whether mtime checks see in-place changes promptly on network volumes the host mounts.
 - How VLCKit's and AVPlayer's track ids map to the container's `trackNumber`.
 - How long players go quiet between requests while buffering, which sets the sleep grace period.
@@ -616,4 +629,4 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 - Wake-on-LAN from tvOS.
 - `notify`-crate reliability on network volumes the host itself mounts.
 - The inotify watch limit (`fs.inotify.max_user_watches`) on the Linux distributions users run, for libraries with many directories. From memory, kernels since 5.11 size its default from RAM; older ones default to 8,192.
-- That file-level watching reports a write when a tagger restores the old mtime, on each platform, and how long FSEvents keeps history for replay after the server was stopped. This should be tested with the taggers users actually run.
+- That file-level watching reports a write when a tagger restores the old mtime on Linux and Windows (tested only on macOS, below), and how long FSEvents keeps history for replay. Both should be tested with the taggers users actually run.

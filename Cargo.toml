@@ -1,35 +1,64 @@
 [package]
-name = "minimoon-sync-server"
-version = "0.4.0"
+name = "minimoon-media-server"
+version = "0.5.0"
 edition = "2021"
-description = "Standalone LAN file sharing server for Minimoon Sync"
+description = "LAN media server for the MiniMoon and Matinee apps, speaking the MiniMoon Media Protocol (MMP)"
 license = "MIT"
 repository = "https://github.com/milesegan/minimoon-sync-server"
 readme = "README.md"
-keywords = ["sync", "music", "lan", "server"]
+keywords = ["media", "music", "video", "lan", "server"]
 categories = ["command-line-utilities", "web-programming::http-server"]
 
 [lib]
-name = "minimoon_sync_server"
+name = "minimoon_media_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "minimoon-sync-server"
+name = "minimoon-media-server"
 path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
 axum = "0.8.9"
+base64 = "0.23.1"
+bytes = "1.12.1"
+dirs = "7.0.0"
+flate2 = "1.1.11"
+futures-util = "0.3.34"
 gethostname = "1.1.0"
-glob = "0.3.4"
+h264-reader = "0.9.0"
+hmac = "0.13.0"
+httpdate = "1.0.3"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 libc = "0.2.189"
+lofty = "0.25.5"
+matroska-demuxer = "0.8.1"
+mdns-sd = "0.21.7"
+mp4-atom = "0.17.1"
+rand = "0.10.3"
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+scuffle-av1 = "0.1.4"
+scuffle-h265 = "0.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
 tokio = { version = "1.53.1", features = ["full"] }
-tower-http = { version = "0.7.0", features = ["cors", "fs", "trace"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+tokio-util = "0.7.20"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
-percent-encoding = "2.3.2"
+uuid = { version = "1.29.2", features = ["v4", "serde"] }
 
 [dev-dependencies]
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
+tempfile = "3.27.0"
 tower = "0.5.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify = "8.2.2"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Power"] }
