@@ -114,9 +114,9 @@ There is one household and no user accounts. Every client that can reach the ser
   "sharedFolders": [{"id": "a41f…", "name": "Music", "available": true},
                     {"id": "0c9e…", "name": "Movies", "available": false}],
   "slices":    [{"id": "6b0e…", "name": "Everything", "kind": "mixed", "available": true,
-                 "etag": "\"9f2c…\"", "filesEtag": "\"18d4…\""},
+                 "etag": "W/\"9f2c…\"", "filesEtag": "W/\"18d4…\""},
                 {"id": "2f9a…", "name": "Road Trip", "kind": "music", "available": true,
-                 "etag": "\"41ab…\"", "filesEtag": "\"e07b…\""},
+                 "etag": "W/\"41ab…\"", "filesEtag": "W/\"e07b…\""},
                 {"id": "c71d…", "name": "Kids", "kind": "mixed", "available": false}]
 }
 ```
@@ -151,7 +151,9 @@ There is one household and no user accounts. Every client that can reach the ser
 - **`folders`:** every ancestor folder of every item, up to and including the shared folder itself, so a client can build the tree without gaps.
 - **`offline`:** the ids of shared folders that are currently unavailable. Their items are listed from the server's last good scan when it has one. After the index is rebuilt it has none, and the folder has no items in the response (see "No previous snapshot" below); the client rule for offline folders keeps the client's copy either way.
 - **Unchanged slice:** the client sends `If-None-Match: <etag>`; the server answers `304 Not Modified` with no body.
-- **ETag:** changes whenever anything in the slice's index changes: a file added, removed or changed, metadata re-read, a folder going offline or coming back, or the slice's definition being edited in the desktop app. The server derives it from its index (for example a hash, or a counter it bumps on every change); clients treat it as opaque.
+- **ETag:** changes whenever anything in the slice's index changes: a file added, removed or changed, metadata re-read, a folder going offline or coming back, or the slice's definition being edited in the desktop app. Clients treat it as opaque.
+  - **Weak, shared by both encodings.** The index is served gzipped or plain depending on `Accept-Encoding`, and RFC 9110 §8.8.3.3 requires a strong ETag to differ between the two. Index ETags are therefore weak (`W/"…"`), the same for both encodings, and index responses carry `Vary: Accept-Encoding`. `If-None-Match` compares weakly, so `304` works for either, and `/v1/server` advertises that one ETag.
+  - **A hash of the contents, never a counter.** The server derives it from a hash of the index's contents. A counter could restart after an index rebuild and repeat an old value for different contents.
 - **Client update:**
   - **Apply all or nothing.** The client applies an index only after it has downloaded and parsed it completely, and applies it in one transaction. A truncated download or a parse error leaves the previous copy untouched.
   - **Compare by item `id`,** scoped to the server's `id`. Items in the local copy but not in the index were removed, including files taken out of the slice. Items new in the index were added. The client's own state key (below) is used only to look up its on-device state, never to decide which files exist, so two files that share a state key stay two files.
@@ -174,9 +176,9 @@ There is one household and no user accounts. Every client that can reach the ser
 }
 ```
 
-  - **Each item** carries only the required `id`, `sharedFolderId`, `path`, `size`, `mtime` and `rev`, all as defined in the wire schema below. `size` is included because the iOS sync compares size as well as mtime (`SyncService.preparePlan`), and `rev` so that a change the server detected with size and mtime unchanged still reaches the iOS app's copy. There are no folders, metadata or `kind`. A client builds folders from paths, and reads kinds and tags from the files it downloads.
+  - **Each item** carries only the required `id`, `sharedFolderId`, `path`, `size`, `mtime` and `rev`, all as defined in the wire schema below. `size` is included because the iOS sync compares size as well as mtime (`SyncService.preparePlan`), and `rev` so that an in-place change the watcher caught with size and mtime unchanged still reaches the iOS app's copy. There are no folders, metadata or `kind`. A client builds folders from paths, and reads kinds and tags from the files it downloads.
   - **`offline`** is kept. A client must still not treat a missing shared folder's files as deleted.
-  - **Its own ETag (`filesEtag`).** The file list is a different representation from the full index, so it has its own strong ETag. That ETag changes only when the list changes: a file added, removed, moved, or changed in size, mtime or `rev`, a folder going offline or coming back, or the slice definition changing which files it covers. Metadata re-reads that don't bump `rev` don't change it, so a server-side reader upgrade doesn't make the iOS app download the list again. `If-None-Match` and `304` work as for the full index.
+  - **Its own ETag (`filesEtag`).** The file list is a different representation from the full index, so it has its own ETag, weak and hashed like the full index's. That ETag changes only when the list changes: a file added, removed, moved, or changed in size, mtime or `rev`, a folder going offline or coming back, or the slice definition changing which files it covers. Metadata re-reads don't change it, so a server-side reader upgrade doesn't make the iOS app download the list again. `If-None-Match` and `304` work as for the full index.
   - **The client rules are the same,** apart from metadata: apply the list all-or-nothing, compare by item `id`, never remove offline folders' items, and redownload media when `size`, `mtime` or `rev` changed. The iOS app stores the `rev` it downloaded alongside size and mtime. The metadata rule doesn't apply, because the client reads metadata from its own copies of the files.
   - **Size (estimated):** about 180 bytes per item before gzip (the example above), roughly a quarter of a full audio item, so about 7 MB for 40,000 tracks, much less gzipped. That's comparable to the Sync server's `/files` listing the iOS app downloads today.
 - **No deltas, cursors or tombstones.** Removals, moves, folder deletes and files added then removed between syncs all fall out of the client's comparison. The server keeps no change history.
@@ -200,12 +202,14 @@ There is one household and no user accounts. Every client that can reach the ser
   `{"id": "f3", "sharedFolderId": "a41f…", "parentId": "f1", "name": "Kind of Blue (1959)", "path": "Miles Davis/Kind of Blue (1959)"}`
 
 - **Item:** required `id`, `sharedFolderId`, `parentId` (the folder containing it), `name`, `path`, `kind`, `size`, `mtime`, `rev`. `mime`, `audio`, `video` and `tags` appear when known.
-- **`rev`** (integer, starting at 0) is a content revision for changes that size and mtime miss.
-  - **When it's bumped:** when the server re-reads a file whose size and mtime haven't changed, with the same reader version as before, and gets different tags, embedded art (compared by a hash of the picture bytes) or audio or video facts. The bytes must have changed in place with the mtime kept, as some taggers can do.
-  - **When it isn't:** a reader-version upgrade gives different results without the file changing, so a re-read by a newer reader never bumps `rev`.
+- **`rev`** (non-negative integer, 0 for most files) is a content revision for changes that size and mtime don't show. Some taggers rewrite a file in place, keep its size and put the old mtime back.
+  - **Detected from file-system events, not from metadata.** The server's file watcher (§8, change detection) reports a write to a file even when its mtime is set back afterwards: FSEvents `ItemModified` on macOS, `IN_MODIFY`/`IN_CLOSE_WRITE` with inotify on Linux, a last-write change from `ReadDirectoryChangesW` on Windows. When a write event arrives for a file whose size and mtime then match the index, the server bumps its `rev`. It never infers a change by comparing metadata, which can't tell changed bytes from a changed reader or a failed read.
+  - **Never reused.** A bump takes the next value of a server-wide counter, and both the counter and each file's bumped `rev` are kept in the server's settings, not in the index (§8). An index rebuild therefore gives every file the same `rev` as before, so changed content can't look like a client's old copy. Bumps are rare, so this list stays small; entries for files that no longer exist are pruned.
   - **What it drives:** it's part of the content ETag (§6), so downloads, `If-Range` and the art cache all see the change, and clients redownload media when it changes.
-  - **Limit:** an in-place change to audio or video data alone, with size and mtime kept and nothing the reader sees changed, still isn't detected.
-  - **Rebuilds:** `rev` lives in the index, so a rebuild resets it to 0. A file whose `rev` was bumped then looks changed and is downloaded again, which is the safe direction.
+  - **Limits (best effort):** events the watcher never sees are missed:
+    - **while the server isn't running:** on macOS the watcher resumes from its last FSEvents event id, kept in settings, so writes made meanwhile are replayed unless the system has purged that history; on Linux and Windows they're missed;
+    - **when events overflow** (FSEvents `MustScanSubDirs`, inotify `IN_Q_OVERFLOW`, a `ReadDirectoryChangesW` buffer overflow): the server rescans that subtree by size and mtime, which can't see an mtime-preserving write, and logs it, rather than bumping every file in it;
+    - **on network volumes** the host mounts, whose events are unreliable (§11).
 
 ```json
 {
@@ -297,15 +301,16 @@ There is one household and no user accounts. Every client that can reach the ser
 - **File bytes:** `GET /v1/items/{id}/content`, or in pairing mode the signed `/v1/c/{id}?…` (§4).
 - **HTTP contract for content:**
   - **Headers:** `Accept-Ranges: bytes`, `Content-Length`, the real `Content-Type`, `Last-Modified`, and a strong `ETag`.
-  - **ETag:** derived from the file's size, its mtime at full precision and its `rev` (`"<size>-<mtime in ns>-<rev>"`, §5). It's declared strong (RFC 9110 §8.8.1) on the assumption that any change to a file's bytes changes its size, its mtime or its `rev`. That assumption breaks only when something rewrites a file in place, keeps its size, puts the old mtime back, and changes nothing the reader sees, such as audio data alone. A strong ETag is needed because RFC 9110 §13.1.5 forbids clients from sending a weak one in `If-Range`.
+  - **No content coding.** Media is always sent as the file's own bytes, never with `Content-Encoding`, so each file has one representation and one ETag.
+  - **ETag:** built from exactly the facts clients compare in the index, `size`, `mtime` in milliseconds and `rev` (`"<size>-<mtime ms>-<rev>"`, §5). Using the index's precision means the ETag and a client's download decision can't disagree about whether a file changed. It's declared strong (RFC 9110 §8.8.1) on the assumption that any change to a file's bytes changes its size, its mtime to the millisecond, or its `rev`. That assumption breaks when the watcher misses an mtime-preserving write (§5, `rev` limits), or when two same-size writes land within one millisecond. A strong ETag is needed because RFC 9110 §13.1.5 forbids clients from sending a weak one in `If-Range`.
   - **Ranges:** a single range per request, in any of the three forms (`bytes=a-b`, `bytes=a-`, `bytes=-n`), answered with `206` and `Content-Range`. A request for several ranges gets the whole file with `200`, which RFC 9110 allows (§14.2). A range starting past the end gets `416` with `Content-Range: bytes */<size>`.
   - **Conditional requests:** `If-Range` with the ETag (a stale ETag gets the whole file with `200`), and `If-None-Match` (`304`).
   - **HEAD** returns the same headers as GET, with no body.
   - **Files that change mid-transfer (best effort).** With `Content-Length`, a response is complete as soon as its last byte arrives (RFC 9112 §6.3), so closing the connection afterwards can't make the client reject it. The check therefore comes before the last byte:
-    - the server records the file's size and mtime when a response starts;
-    - after reading the response's final chunk from disk, and before sending it, it checks them again;
-    - if either changed, it closes the connection without sending that chunk, so the client sees an incomplete transfer, not a silently mixed file.
-    Any write that landed before the final read changed the mtime by then, so on a local disk this catches every in-place change that affected the bytes sent. On network volumes the host mounts, attribute caching can hide a change, so there it's best effort. Apps that save by writing a new file and renaming it over the old one are safe anyway on macOS and Linux, because the server keeps reading the file it opened.
+    - the server records the file's size and mtime (at full precision) when a response starts;
+    - after reading the response's final chunk from disk, and before sending it, it checks them again, and checks whether the watcher has reported a write to that file since the response started;
+    - if anything changed, it closes the connection without sending that chunk, so the client sees an incomplete transfer, not a silently mixed file.
+    This catches a write that updates the mtime, and a write the watcher reports even if the mtime is put back afterwards. It misses a write whose mtime was restored and whose event hasn't arrived or was lost, and on network volumes the host mounts, attribute caching and unreliable events can hide a change. The whole mechanism is best effort. Apps that save by writing a new file and renaming it over the old one are safe anyway on macOS and Linux, because the server keeps reading the file it opened.
   - **Across range requests.** A player seeking through a file makes many separate requests. Each response carries the ETag, but a changed file is caught across requests only if the player sends `If-Range`, or compares the ETag itself. Whether VLCKit and AVPlayer do is unverified and is part of the playback test (§10). Until that's known, consistency across a playback session is best effort.
   - **Interrupted downloads** resume with `Range` plus `If-Range`:
     - **`206`:** the client checks that `Content-Range` starts exactly at the length of its partial file, appends the body, and checks the finished file's length against the total in `Content-Range` (the `/<size>` part). `Content-Length` on a `206` is the length of the range, not of the file.
@@ -440,21 +445,28 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
     - **Only the active preset is published.** The other presets are migrated unpublished, and the desktop app shows them as migrated, so the user decides which ones devices should see. Before the upgrade only the active preset was listed to devices. (Raw downloads from the Sync server already ignored the selection, so this is about what's listed, not new file access.)
 - **Enforcement:** an item is served (`/content`, `/art`, `/lyrics`, signed URLs) only if it's in at least one published, available slice; otherwise it gets `404`, as if it didn't exist. Item routes aren't scoped by slice, because every client can see every published slice. Slices are enforced by the server on every route, not only in listings.
 - **Index:**
-  - **Contents:** a SQLite database in the app's data directory, holding files, folders, their metadata and `rev`, and each shared folder's last snapshot. Each file is indexed once, however many slices include it.
-  - **Reader version:** each indexed file records the version of the metadata reader that read it.
+  - **Contents:** a SQLite database in the app's data directory, holding files, folders, their metadata, and each shared folder's last snapshot. Each file is indexed once, however many slices include it.
+  - **Reader version and read status:** each indexed file records the version of the metadata reader that read it, and how the read went:
+    - **read:** metadata extracted;
+    - **failed temporarily:** a timeout or I/O error, which may succeed later;
+    - **unreadable:** an unsupported or malformed file, which won't.
   - **Settings, not index:** everything that can't be rebuilt from the disks lives in the server's settings, so rebuilding the index from scratch never changes an identity:
     - the server's `id`;
     - the shared folders: UUID, path on disk, display name and volume identity;
     - slice definitions, which refer to shared folders by UUID;
+    - each file's bumped `rev` and the counter they're drawn from (§5), and the watcher's last FSEvents event id on macOS;
     - when pairing is on, paired devices and the URL-signing key.
   - **Why it exists:** so metadata isn't re-read on every request; the Sync server's `/files` walks the whole tree on every call.
   - **Ready responses:** the server may also keep each slice's gzipped index response ready, rebuilt when the slice changes.
 - **Change detection:**
-  - **Triggers:** file-system watching, plus a full rescan at startup and periodically.
+  - **Triggers:** file-system watching, plus a full rescan at startup and periodically. The watcher subscribes to file-level events (on macOS, an FSEvents stream with `FileEvents`), because detecting in-place writes (§5, `rev`) needs to know which file was written, not only which folder changed.
   - **Re-reading metadata:**
     - files whose size or mtime changed are re-read;
+    - files whose `rev` was bumped are re-read;
     - files read by an older reader version are re-read in the background after a server update, so reader fixes reach existing files and then clients, through the metadata rule in §5, without any media being downloaded again;
-    - a "Reindex everything" command in the desktop app re-reads every file. Where a file's size and mtime are unchanged but the same reader version now reads different tags, art or stream facts, its `rev` is bumped (§5), so clients download it again and resized art is regenerated. It doesn't catch an in-place change the reader can't see, such as audio data alone.
+    - files whose read failed temporarily are retried on later scans, waiting longer after each failure, up to a fixed number of attempts; after that they're treated as unreadable. Recovering from a failed read is never taken as a sign that the file changed;
+    - unreadable files are re-read only when their size, mtime or `rev` changes, after a reader upgrade, or on "Reindex everything";
+    - a "Reindex everything" command in the desktop app re-reads every file's metadata. It never changes `rev` or makes clients download media again; content changes come only from size, mtime and the watcher.
   - **Scan safety:** the volume check, scans that publish nothing after a scan error, and one-step publication are as in §5.
 - **Tag reading: a copy, not a dependency.**
   - **What's copied.** The server doesn't depend on the apps' `minimoon_tags` crate. It carries a copy of only the reading side: `read_tag` and its helpers, the native-text and sort-tag reading, and embedded-picture reading. The crate's writing and tag-copying code, and its C interface for Swift, stay out.
@@ -464,7 +476,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 - **Reading metadata safely:**
   - a failure to read a file's metadata never stops the file being listed or served (§5);
   - the reader has a time and size limit per file, and a file that exceeds it is indexed with the required fields only;
-  - errors are logged and shown as a count in the desktop app.
+  - errors are logged and shown as a count in the desktop app, split into temporary failures and unreadable files.
 - **Sleep:**
   - **While streaming:** while any content response is streaming, the server holds a "prevent idle sleep" assertion on macOS (and the Windows equivalent).
   - **Grace period:** the assertion is kept for a grace period after the last request, because players buffer ahead and can go quiet for a while in the middle of playback. Its length needs tuning against real buffered playback in VLCKit and AVPlayer.
@@ -496,9 +508,10 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   2. Rename and rebrand the server, and remove the Sync protocol's routes. An upgraded server no longer answers older MiniMoon iOS versions, so an app version that speaks MMP has to ship before or with it; the apps own that transition. Keep the bundle identifier (`com.plastaq.sync-server`) and the updater endpoint so existing installs upgrade in place. Whether the Tauri updater handles a product-name change cleanly is unverified.
   3. `/v1/server` and Bonjour advertising, open mode only.
   4. **The index:**
-     - shared folders (UUIDs, paths, names, volume identities) in the server's settings, and a SQLite index of files and metadata, with reader versions and `rev`;
+     - shared folders (UUIDs, paths, names, volume identities), bumped `rev` values and their counter in the server's settings, and a SQLite index of files and metadata, with reader versions and read status;
+     - a file-level watcher that bumps `rev` on in-place writes (§5), resuming from its last event id on macOS. The `notify` crate (8.2.2) covers Linux (inotify, with a watch per directory and `IN_Q_OVERFLOW` reported as a rescan) and Windows. Its FSEvents backend always starts from "now" and doesn't expose event ids, so replay after a restart on macOS needs the server's own FSEvents stream, or a patch to `notify` that exposes the starting id;
      - the scan-safety rules in §5: the volume check, nothing published after a scan error, one-step publication, no partial first publish;
-     - `/index` with ETag and `304`, in both views (`full` and `files`), each with its own ETag.
+     - `/index` with weak ETags and `304`, in both views (`full` and `files`), each with its own ETag.
      This is the largest server piece.
   5. `/content` (from step 1), `/art` and `/lyrics`.
   6. **Desktop app UI:**
@@ -557,7 +570,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - Matinee keys share files by name + size (`ShareScanner.swift`, `ShareKeys.ownKey`); uploads add a first/last-MB hash (`FileHashing.swift`).
   - Matinee already plays and lists SMB through VLCKit 4.
   - Running Matinee's prober code over 107 real files, its VLCKit path never set a dynamic range, so MKV and share files get no HDR or Dolby Vision label. It also missed the frame rate for 5 files and reported HE-AAC parametric stereo as mono ([video-reader-test.md](video-reader-test.md)).
-  - The video reader test: native Rust, ffprobe and MediaInfo agree on duration, codec, size, transfer, Dolby Vision, HDR10+ and covers for all 107 real files. All three were correct on 10 synthetic HDR clips ([video-reader-test.md](video-reader-test.md)).
+  - The video reader test: native Rust, ffprobe and MediaInfo agree on duration, codec, size, transfer, Dolby Vision, HDR10+ and covers for all 107 real files. On 10 synthetic HDR clips all three detected every HDR format and read the audio tracks, tags and covers correctly; the Rust probe didn't read the MP4 forced flag ([video-reader-test.md](video-reader-test.md)).
   - Matinee probes each video once and caches a `ProbeResult` in a purgeable sidecar (`Playback.swift`, `LibraryStore.swift`). It holds duration, size, video codec, dynamic range, frame rate, the first audio track's codec and channels, and audio and subtitle track counts. Local MP4 and MOV files go through AVFoundation; everything else, including share files, goes through a VLCKit parse with a 10-second limit (`VLCKitProber` in `VLCKitEngine.swift`).
   - The Sync app's selection: a tree of folders and files saved as named presets in web storage, one active at a time (`minimoon-sync/src/state.ts`). Folder node ids end in `/`. The server receives the active preset as `selected_roots` and filters `/files` by path prefix, with an empty list meaning everything (`list_files_handler`).
   - MiniMoon's iOS sync already downloads the full `/files` list and compares by library-relative path, size and mtime (`SyncService.swift`); the comparison once blocked the main actor on a large library (MINIMOON-B9).
@@ -570,6 +583,9 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 - **Standards:**
   - RFC 9110 §15.5.22: a `426` response must carry an `Upgrade` header.
   - RFC 9110 §13.1.5: clients must not send a weak ETag in `If-Range`.
+  - RFC 9110 §8.8.3.3: a strong ETag for a gzip-encoded representation has to differ from the unencoded one's.
+- **Crates:**
+  - `notify` 8.2.2 (from its source): watches inotify `CLOSE_WRITE` and `ATTRIB`, reports `IN_Q_OVERFLOW` and dropped FSEvents as `Rescan`, adds a watch per subdirectory for recursion, and subscribes to file-level FSEvents. Its FSEvents stream starts at `kFSEventStreamEventIdSinceNow`, with no way to pass a starting event id.
   - RFC 9110 §14.2: a server may ignore a request for several ranges.
   - RFC 9112 §6.3: with `Content-Length`, a message is incomplete only if the connection closes before that many bytes arrive, so closing afterwards doesn't make a complete response fail.
 - **Apple and competitors:**
@@ -599,3 +615,5 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 - Whether Bonjour Sleep Proxy wakes the host on access.
 - Wake-on-LAN from tvOS.
 - `notify`-crate reliability on network volumes the host itself mounts.
+- The inotify watch limit (`fs.inotify.max_user_watches`) on the Linux distributions users run, for libraries with many directories. From memory, kernels since 5.11 size its default from RAM; older ones default to 8,192.
+- That file-level watching reports a write when a tagger restores the old mtime, on each platform, and how long FSEvents keeps history for replay after the server was stopped. This should be tested with the taggers users actually run.
