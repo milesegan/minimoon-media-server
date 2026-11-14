@@ -34,10 +34,13 @@ use std::path::Path;
 
 /// The version of this reader. Bump it whenever a change could alter what it reads from an
 /// already-indexed file, so the server re-reads every file (spec §8, index).
-pub const READER_VERSION: u32 = 1;
+pub const READER_VERSION: u32 = 2;
 
 /// Per-item allocation limit for tag work, in MiB, as in the apps' crate.
 const LOFTY_SIZE_LIMIT: usize = 32usize;
+
+/// Rating points per star on the apps' 0–255 scale, where a track shows `rating / 51` stars.
+const RATING_POINTS_PER_STAR: u32 = 51;
 
 /// The `ilst` atom an MP4 rating lives in, as text from 0 to 100.
 const MP4_RATING: AtomIdent<'static> = AtomIdent::Fourcc(*b"rate");
@@ -84,7 +87,7 @@ pub fn read_audio_lyrics(path: &Path) -> Result<Option<String>, ReadError> {
     guarded(|| {
         require_file(path)?;
         let parts = read_parts(path, tag_options())?;
-        Ok(get_tag_string(&parts.tag, ItemKey::Lyrics))
+        Ok(lyrics(&parts.tag))
     })
 }
 
@@ -155,9 +158,12 @@ fn classify(error: &(dyn std::error::Error + 'static)) -> ReadError {
 ///
 /// lofty's generic tag turns an MP4 `rate` atom into a five-star popularimeter on the way in, so
 /// a rating of 50 reads as nothing. The rating is read from the native `ilst` instead.
+///
+/// Other files keep their native text tag, and the rating from their ID3v2 `POPM` frames, which
+/// lofty's generic tag cannot carry exactly.
 enum SniffedFile {
     Mp4(Mp4File),
-    Other(TaggedFile, Option<NativeTextTag>),
+    Other(TaggedFile, Option<NativeTextTag>, Option<u32>),
 }
 
 /// Reads a file, choosing the parser from its content rather than from its extension.
@@ -169,7 +175,7 @@ enum SniffedFile {
 fn read_sniffed(path: &Path, options: Option<ParseOptions>) -> Result<TaggedFile, ReadError> {
     match read_sniffed_native(path, options)? {
         SniffedFile::Mp4(file) => Ok(file.into()),
-        SniffedFile::Other(file, _) => Ok(file),
+        SniffedFile::Other(file, _, _) => Ok(file),
     }
 }
 
@@ -200,8 +206,7 @@ fn read_sniffed_native(
         | FileType::Speex
         | FileType::Ape
         | FileType::WavPack
-        | FileType::Mpc
-        | FileType::Mpeg),
+        | FileType::Mpc),
     ) = probe.file_type()
     {
         let mut reader = probe.into_inner();
@@ -209,11 +214,21 @@ fn read_sniffed_native(
             .seek(SeekFrom::Start(0))
             .map_err(|error| ReadError::from_io(&error))?;
         return read_text_file(&mut reader, kind, options)
-            .map(|(file, native)| SniffedFile::Other(file, native));
+            .map(|(file, native)| SniffedFile::Other(file, native, None));
+    }
+    if let Some(kind @ (FileType::Mpeg | FileType::Wav | FileType::Aiff | FileType::Aac)) =
+        probe.file_type()
+    {
+        let mut reader = probe.into_inner();
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| ReadError::from_io(&error))?;
+        return read_id3_file(&mut reader, kind, options)
+            .map(|(file, native, rating)| SniffedFile::Other(file, native, rating));
     }
     probe
         .read()
-        .map(|file| SniffedFile::Other(file, None))
+        .map(|file| SniffedFile::Other(file, None, None))
         .map_err(|error| classify(&error))
 }
 
@@ -291,12 +306,16 @@ fn read_parts(path: &Path, options: ParseOptions) -> Result<Parts, ReadError> {
                 native: None,
             }
         }
-        SniffedFile::Other(mut tagged_file, native) => {
+        SniffedFile::Other(mut tagged_file, native, id3_rating) => {
             let properties = tagged_file.properties().clone();
             let tag = tagged_file
                 .remove(effective_tag_type(&tagged_file))
                 .unwrap_or_else(|| LoftyTag::new(tagged_file.file_type().primary_tag_type()));
-            let rating = get_tag_number(&tag, ItemKey::Popularimeter);
+            let rating = if tag.tag_type() == TagType::Id3v2 {
+                id3_rating
+            } else {
+                get_tag_number(&tag, ItemKey::Popularimeter)
+            };
             Parts {
                 tag,
                 properties,
@@ -342,11 +361,17 @@ impl Parts {
                 date_year: tag.date().map(|date| u32::from(date.year)),
                 rating: self.rating,
                 compilation: get_tag_flag(tag, ItemKey::FlagCompilation),
-                has_lyrics: get_tag_string(tag, ItemKey::Lyrics).is_some(),
+                has_lyrics: lyrics(tag).is_some(),
                 has_embedded_art: !tag.pictures().is_empty(),
             },
         }
     }
+}
+
+/// A tag's lyrics. lofty reads an ID3v2 `USLT` frame, and Vorbis `UNSYNCEDLYRICS`, as
+/// `ItemKey::UnsyncLyrics` rather than `ItemKey::Lyrics`.
+fn lyrics(tag: &LoftyTag) -> Option<String> {
+    get_tag_string(tag, ItemKey::Lyrics).or_else(|| get_tag_string(tag, ItemKey::UnsyncLyrics))
 }
 
 /// `None` for zero, which lofty reports when it doesn't know a property.
@@ -467,13 +492,68 @@ fn read_text_file<R: Read + Seek>(
             let native = file.ape().cloned().map(NativeTextTag::Ape);
             Ok((file.into(), native))
         }
+        _ => Err(ReadError::Unreadable(format!(
+            "{kind:?} has no native text reader"
+        ))),
+    }
+}
+
+// MARK: - ID3v2 (copied from minimoon_tags id3.rs)
+
+/// The rating held in an ID3v2 tag's `POPM` frames, on the apps' 0–255 scale.
+///
+/// lofty's generic tag turns a `POPM` frame into `email|stars|counter` text, which the rating's
+/// number parse rejects, and which reads a byte of 0 ("unrated") the same as one star. So the
+/// rating comes from the native frame instead.
+///
+/// Taggers disagree on what byte a star count gets: Windows Media Player and MusicBee write 1,
+/// 64, 128, 196 and 255, while Picard and MiniMoon's own scale use multiples of 51. Rounding the
+/// byte up to the next multiple of 51 gives every one of those the star count its tagger meant.
+/// The first frame with a rating wins.
+fn popm_rating(tag: &Id3v2Tag) -> Option<u32> {
+    tag.into_iter().find_map(|frame| match frame {
+        Frame::Popularimeter(popm) if popm.rating > 0 => {
+            Some(u32::from(popm.rating).div_ceil(RATING_POINTS_PER_STAR) * RATING_POINTS_PER_STAR)
+        }
+        _ => None,
+    })
+}
+
+/// Reads a file that can carry an ID3v2 tag, keeping what its generic conversion loses.
+///
+/// Returns the file, its native APE tag where the format can carry one, and the rating from its
+/// ID3v2 `POPM` frames.
+fn read_id3_file<R: Read + Seek>(
+    reader: &mut R,
+    kind: FileType,
+    options: ParseOptions,
+) -> Result<(TaggedFile, Option<NativeTextTag>, Option<u32>), ReadError> {
+    let parse_error = |error: lofty::error::FileParseError| classify(&error);
+    match kind {
         FileType::Mpeg => {
             let file = lofty::mpeg::MpegFile::read_from(reader, options).map_err(parse_error)?;
             let native = file.ape().cloned().map(NativeTextTag::Ape);
-            Ok((file.into(), native))
+            let rating = file.id3v2().and_then(popm_rating);
+            Ok((file.into(), native, rating))
+        }
+        FileType::Wav => {
+            let file = lofty::iff::wav::WavFile::read_from(reader, options).map_err(parse_error)?;
+            let rating = file.id3v2().and_then(popm_rating);
+            Ok((file.into(), None, rating))
+        }
+        FileType::Aiff => {
+            let file =
+                lofty::iff::aiff::AiffFile::read_from(reader, options).map_err(parse_error)?;
+            let rating = file.id3v2().and_then(popm_rating);
+            Ok((file.into(), None, rating))
+        }
+        FileType::Aac => {
+            let file = lofty::aac::AacFile::read_from(reader, options).map_err(parse_error)?;
+            let rating = file.id3v2().and_then(popm_rating);
+            Ok((file.into(), None, rating))
         }
         _ => Err(ReadError::Unreadable(format!(
-            "{kind:?} has no native text reader"
+            "{kind:?} has no ID3v2 reader"
         ))),
     }
 }
@@ -643,9 +723,8 @@ mod tests {
                 .pic_type(PictureType::CoverFront)
                 .build(),
         );
-        // Lyrics need a language, which only the native frame can carry. lofty maps an ID3v2
-        // `USLT` frame to `ItemKey::UnsyncLyrics`, and the apps' reader (copied here) looks only
-        // at `ItemKey::Lyrics`, so ID3v2 lyrics aren't found by either.
+        // Lyrics need a language, which only the native frame can carry. lofty reads the `USLT`
+        // frame as `ItemKey::UnsyncLyrics`.
         let mut id3 = Id3v2Tag::from(tag);
         id3.insert(Frame::UnsynchronizedText(UnsynchronizedTextFrame::new(
             TextEncoding::UTF8,
@@ -663,14 +742,113 @@ mod tests {
         assert_eq!(read.tags.track_number_total, Some(5));
         assert_eq!(read.tags.date_year, Some(1959));
         assert_eq!(read.tags.sort_album_artist.as_deref(), Some("Davis, Miles"));
-        assert!(!read.tags.has_lyrics);
+        assert!(read.tags.has_lyrics);
         assert!(read.tags.has_embedded_art);
         assert!(!read.tags.compilation);
 
-        assert_eq!(read_audio_lyrics(&path).unwrap(), None);
+        assert_eq!(
+            read_audio_lyrics(&path).unwrap().as_deref(),
+            Some("So what")
+        );
         let art = read_audio_art(&path).unwrap().unwrap();
         assert_eq!(art.data, PNG_PIXEL);
         assert_eq!(art.mime, "image/png");
+    }
+
+    /// A copy of a fixture from `tests/fixtures`, in `dir`.
+    fn fixture(dir: &TempDir, name: &str) -> PathBuf {
+        let path = dir.0.join(name);
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name),
+            &path,
+        )
+        .unwrap();
+        path
+    }
+
+    fn save_id3(path: &Path, frames: Vec<Frame<'static>>) {
+        let mut id3 = Id3v2Tag::new();
+        for frame in frames {
+            id3.insert(frame);
+        }
+        id3.save_to_path(path, WriteOptions::new()).unwrap();
+    }
+
+    fn popm(email: &str, rating: u8, counter: u64) -> Frame<'static> {
+        Frame::Popularimeter(lofty::id3::v2::PopularimeterFrame::new(
+            email.to_owned(),
+            rating,
+            counter,
+        ))
+    }
+
+    /// lofty shows a `POPM` frame to the generic tag as `email|stars|counter` text, which the
+    /// number parse rejected, so no MP3 or WAV rating ever read. The byte comes through on the
+    /// apps' 0–255 scale, as the star count its tagger meant, with 0 meaning unrated.
+    #[test]
+    fn id3_popm_ratings_read_on_the_apps_scale() {
+        let dir = TempDir::new("popm");
+        let wav = dir.0.join("song.wav");
+        fs::write(&wav, silent_wav()).unwrap();
+        for path in [fixture(&dir, "untagged.mp3"), wav] {
+            for (email, byte, expected) in [
+                ("Windows Media Player 9 Series", 196, Some(204)),
+                ("Windows Media Player 9 Series", 1, Some(51)),
+                ("users@musicbrainz.org", 102, Some(102)),
+                ("MusicBee", 255, Some(255)),
+                ("Windows Media Player 9 Series", 0, None),
+            ] {
+                save_id3(&path, vec![popm(email, byte, 7)]);
+                assert_eq!(
+                    read_audio(&path).unwrap().tags.rating,
+                    expected,
+                    "{} {email} {byte}",
+                    path.display()
+                );
+            }
+            // The first frame that holds a rating wins.
+            save_id3(
+                &path,
+                vec![popm("a@example.com", 0, 3), popm("b@example.com", 128, 0)],
+            );
+            assert_eq!(read_audio(&path).unwrap().tags.rating, Some(153));
+        }
+    }
+
+    /// Lyrics stored as unsynced lyrics are found: an MP3's `USLT` frame and a FLAC's
+    /// `UNSYNCEDLYRICS` comment.
+    #[test]
+    fn unsynced_lyrics_are_found() {
+        let dir = TempDir::new("lyrics");
+        let mp3 = fixture(&dir, "untagged.mp3");
+        save_id3(
+            &mp3,
+            vec![Frame::UnsynchronizedText(UnsynchronizedTextFrame::new(
+                TextEncoding::UTF8,
+                *b"eng",
+                "",
+                "Line one\nLine two".to_owned(),
+            ))],
+        );
+        let flac = fixture(&dir, "sinewave.flac");
+        let mut vorbis = VorbisComments::default();
+        vorbis.insert("UNSYNCEDLYRICS".into(), "Line one\nLine two".into());
+        vorbis.save_to_path(&flac, WriteOptions::new()).unwrap();
+        for path in [mp3, flac] {
+            assert!(
+                read_audio(&path).unwrap().tags.has_lyrics,
+                "{}",
+                path.display()
+            );
+            assert_eq!(
+                read_audio_lyrics(&path).unwrap().as_deref(),
+                Some("Line one\nLine two"),
+                "{}",
+                path.display()
+            );
+        }
     }
 
     #[test]
