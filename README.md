@@ -56,7 +56,7 @@ drive or another folder, add it as a shared folder of its own.
 ## Desktop app
 
 `gui/` is a small Tauri app that runs the server in-process and controls it: pause and resume,
-shared folders (add, rename, remove, rescan), reindexing, the display name, open or pairing
+shared folders (add, rename, remove, rescan, open in the file manager), reindexing, the display name, open or pairing
 access, keep-awake, pairing codes as they arrive, and paired devices with revocation.
 
 ```sh

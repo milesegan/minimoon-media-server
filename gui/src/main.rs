@@ -367,6 +367,36 @@ async fn rescan(app: State<'_, App>, id: Option<String>) -> Result<(), String> {
     .await
 }
 
+/// Opens a shared folder in the platform's file manager.
+#[tauri::command]
+async fn open_folder(app: State<'_, App>, id: String) -> Result<(), String> {
+    let id = parse_id(&id)?;
+    blocking(app.server()?, move |server| {
+        let settings = server.library().settings();
+        let path = &settings
+            .folder(id)
+            .context("that folder isn't shared")?
+            .path;
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(windows) {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        let status = std::process::Command::new(opener)
+            .arg(path)
+            .status()
+            .with_context(|| format!("can't run {opener}"))?;
+        // Explorer exits with 1 even when it opened the folder.
+        if !status.success() && !cfg!(windows) {
+            bail!("can't open {}", path.display());
+        }
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 async fn reindex_everything(app: State<'_, App>) -> Result<(), String> {
     blocking(app.server()?, |server| {
@@ -505,6 +535,7 @@ fn main() -> Result<()> {
             rename_folder,
             remove_folder,
             rescan,
+            open_folder,
             reindex_everything,
             revoke_device,
         ])
