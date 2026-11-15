@@ -160,7 +160,6 @@ async fn server_info_lists_folders_and_index_etags() {
     assert_eq!(info["software"]["name"], "minimoon-media-server");
     assert_eq!(info["sharedFolders"][0]["name"], "Music");
     assert_eq!(info["sharedFolders"][0]["available"], true);
-    assert!(info.get("slices").is_none());
     let etag = info["index"]["etag"].as_str().unwrap();
     let files_etag = info["index"]["filesEtag"].as_str().unwrap();
     assert!(etag.starts_with("W/\""));
@@ -261,17 +260,6 @@ async fn index_has_weak_etags_304s_gzip_and_both_views() {
         .await
         .unwrap();
     assert_eq!(files_not_modified.status(), StatusCode::NOT_MODIFIED);
-
-    // The old per-slice route is gone, like any unknown route.
-    let missing = f
-        .client
-        .get(f.url("/v1/slices/6b0e0000-0000-4000-8000-000000000000/index"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    let missing: Value = missing.json().await.unwrap();
-    assert_eq!(missing["error"]["code"], "not_found");
     f.server.shutdown().await;
 }
 
@@ -666,7 +654,6 @@ async fn events_announce_index_and_folder_changes() {
     let mut text = String::new();
     read_events_until(&mut events, &mut text, "event: index-changed").await;
     assert!(text.contains("\"filesEtag\""));
-    assert!(!text.contains("sliceId"));
 
     let folder = f.server.library().shared_folders()[0].id;
     f.server

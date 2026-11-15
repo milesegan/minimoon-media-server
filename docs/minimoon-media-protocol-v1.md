@@ -324,7 +324,6 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 - **Shared folders:**
   - **Shared folders** are the folders on disk the user shares, added in the desktop app or with CLI flags. The Sync app has one today; MMP allows several. They're merged into one tree, each as a top-level folder.
   - **Identity versus label.** Each shared folder gets a permanent UUID when it's added. Identity (§5) and availability use that UUID. Its display name defaults to the folder's name on disk; a clash gets a number added (`Music 2`). The user can rename it freely, since renaming changes only the label.
-  - **No selections.** The Sync app's file-selection tree and presets aren't carried over. The server publishes everything under its shared folders, and every client reads all of it (§4).
 - **Enforcement:** an item is served (`/content`, `/art`, `/lyrics`, signed URLs) only if it's in the index: inside a shared folder and not filtered out (§9). Anything else, including an item that has since been removed, gets `404`, as if it didn't exist. Enforced by the server on every route, not only in listings.
 - **Index:**
   - **Contents:** a SQLite database in the app's data directory, holding files, folders, their metadata, and each shared folder's last snapshot.
@@ -453,7 +452,6 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
   - Running Matinee's prober code over 107 real files, its VLCKit path never set a dynamic range, so MKV and share files get no HDR or Dolby Vision label. It also missed the frame rate for 5 files and reported HE-AAC parametric stereo as mono ([video-reader-test.md](video-reader-test.md)).
   - The video reader test: native Rust, ffprobe and MediaInfo agree on duration, codec, size, transfer, Dolby Vision, HDR10+ and covers for all 107 real files. On 10 synthetic HDR clips all three detected every HDR format and read the audio tracks, tags and covers correctly; the Rust probe didn't read the MP4 forced flag ([video-reader-test.md](video-reader-test.md)).
   - Matinee probes each video once and caches a `ProbeResult` in a purgeable sidecar (`Playback.swift`, `LibraryStore.swift`). It holds duration, size, video codec, dynamic range, frame rate, the first audio track's codec and channels, and audio and subtitle track counts. Local MP4 and MOV files go through AVFoundation; everything else, including share files, goes through a VLCKit parse with a 10-second limit (`VLCKitProber` in `VLCKitEngine.swift`).
-  - The Sync app's selection: a tree of folders and files saved as named presets in web storage, one active at a time (`minimoon-sync/src/state.ts`). Folder node ids end in `/`. The server receives the active preset as `selected_roots` and filters `/files` by path prefix, with an empty list meaning everything (`list_files_handler`).
   - MiniMoon's iOS sync already downloads the full `/files` list and compares by library-relative path, size and mtime (`SyncService.swift`); the comparison once blocked the main actor on a large library (MINIMOON-B9).
   - The Sync server has no auth.
   - `lofty` reads no video fields and fails on Matroska; it reads MP4 tags and covers correctly (video reader test).
@@ -487,7 +485,6 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 **Unverified**
 
 - Whether Jellyfin or OpenSubsonic have a change feed.
-- What users actually use Sync app presets for. Presets aren't migrated, so anyone who used them to limit what the iOS app copied now gets everything under the shared folders.
 - Index size and the time to parse and compare it on an Apple TV for a 100,000-track library (only estimated).
 - VLCKit and AVPlayer playback, seeking and recovery against this server's HTTP contract (the first step in §10), including whether either sends `If-Range` or checks the ETag across range requests.
 - Whether mtime checks see in-place changes promptly on network volumes the host mounts.

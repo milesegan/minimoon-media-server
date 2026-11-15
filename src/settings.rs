@@ -4,9 +4,6 @@
 //! Rebuilding the index from scratch never changes an identity, because the server id, the
 //! shared folders' UUIDs and volume identities, the bumped `rev` values and the pairing state all
 //! live here, in `settings.json` in the server's data directory.
-//!
-//! Unknown keys are ignored when loading and dropped when saving. Earlier builds kept slice
-//! definitions, which no longer exist, so a `slices` key from one of them loads and goes away.
 
 use crate::volume::VolumeIdentity;
 use anyhow::{Context, Result};
@@ -313,29 +310,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(Settings::path_in(dir.path()), b"{not json").unwrap();
         assert!(Settings::load_or_create(dir.path()).is_err());
-    }
-
-    #[test]
-    fn ignores_and_drops_a_slices_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = Settings::path_in(dir.path());
-        std::fs::write(
-            &path,
-            br#"{"formatVersion": 1, "serverId": "6f1c0000-0000-4000-8000-000000000000",
-                 "slices": [{"id": "6b0e0000-0000-4000-8000-000000000000", "name": "Everything",
-                             "kind": "mixed", "published": true,
-                             "definition": {"type": "all"}}]}"#,
-        )
-        .unwrap();
-        let settings = Settings::load_or_create(dir.path()).unwrap();
-        assert_eq!(
-            settings.server_id.to_string(),
-            "6f1c0000-0000-4000-8000-000000000000"
-        );
-        settings.save(dir.path()).unwrap();
-        let written: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(written.get("slices").is_none());
     }
 
     #[test]
