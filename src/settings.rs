@@ -246,6 +246,15 @@ impl Default for Settings {
     }
 }
 
+/// The data directory the CLI and the desktop apps share by default: `com.plastaq.sync-server/
+/// media-server` in the platform's app-data folder.
+pub fn default_data_dir() -> Result<PathBuf> {
+    Ok(dirs::data_dir()
+        .context("no app-data folder on this system; pass --data-dir")?
+        .join("com.plastaq.sync-server")
+        .join("media-server"))
+}
+
 /// The host name, without a `.local` suffix.
 pub fn default_server_name() -> String {
     let host = gethostname::gethostname().to_string_lossy().into_owned();

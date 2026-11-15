@@ -53,6 +53,24 @@ Anything in a shared folder the server can't read is treated as not there, and t
 prints which paths failed. Symbolic links are never followed, wherever they point: to share a
 drive or another folder, add it as a shared folder of its own.
 
+## Desktop app
+
+`gui/` is a small Tauri app that runs the server in-process and controls it: pause and resume,
+shared folders (add, rename, remove, rescan), reindexing, the display name, open or pairing
+access, keep-awake, pairing codes as they arrive, and paired devices with revocation.
+
+```sh
+cargo run -p minimoon-media-server-gui
+```
+
+It uses the same data directory as the CLI by default, so don't run both at once. It accepts
+`--data-dir <dir>` and `--port <port>` like the CLI. The frontend is plain HTML, CSS and
+JavaScript in `gui/ui/`, with no Node build step. To make an app bundle, install the Tauri CLI
+(`cargo install tauri-cli --version '^2'`) and run `cargo tauri build` in `gui/`.
+
+The GUI is a workspace member but not a default member, so `cargo build` and `cargo test` at the
+root don't build it (on Linux it needs the WebKitGTK development packages).
+
 ## HTTP API
 
 All routes are under `/v1`; see the spec for the full contract.

@@ -6,7 +6,7 @@ use minimoon_media_server::library::{
     IndexActivity, LibraryOptions, SharedFolderStatus, NOT_INDEXED_YET,
 };
 use minimoon_media_server::network::preferred_bind_ip;
-use minimoon_media_server::settings::AuthMode;
+use minimoon_media_server::settings::{default_data_dir, AuthMode};
 use minimoon_media_server::{MediaServer, ServerOptions};
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -91,14 +91,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
         }
     }
     Ok(options)
-}
-
-/// The data directory the desktop app and the CLI share by default.
-fn default_data_dir() -> Result<PathBuf> {
-    Ok(dirs::data_dir()
-        .context("no app-data folder on this system; pass --data-dir")?
-        .join("com.plastaq.sync-server")
-        .join("media-server"))
 }
 
 #[tokio::main]

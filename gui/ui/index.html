@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MiniMoon Media Server</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="identity">
+        <h1 id="server-name">MiniMoon Media Server</h1>
+        <div class="status-line">
+          <span id="pill" class="pill">Starting…</span>
+          <span id="address" class="address" hidden></span>
+        </div>
+      </div>
+      <button id="pause" disabled>Pause Sharing</button>
+    </header>
+
+    <div id="failure" class="banner failure" hidden>
+      <strong>The server couldn't start.</strong>
+      <span id="failure-text"></span>
+    </div>
+
+    <div id="pairings"></div>
+
+    <main>
+      <section>
+        <h2>Shared Folders</h2>
+        <ul id="folders" class="list"></ul>
+        <p id="no-folders" class="empty" hidden>
+          No shared folders yet. Add a folder of music or video to share it with devices on this
+          network.
+        </p>
+        <div class="actions">
+          <button id="add-folder" class="primary" disabled>Add Folder…</button>
+          <button id="rescan-all" disabled>Rescan All</button>
+          <button id="reindex" disabled title="Re-read every file's metadata in the background">
+            Reindex Everything
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Settings</h2>
+        <label class="field">
+          <span class="label">Name</span>
+          <input id="name-input" type="text" spellcheck="false" autocomplete="off" disabled />
+          <span class="hint">What devices see. Leave empty to use this computer's name.</span>
+        </label>
+        <fieldset class="field">
+          <legend class="label">Access</legend>
+          <label class="choice">
+            <input type="radio" name="access" value="open" disabled />
+            <span>Open to this network <span class="hint">Any device on the network can connect.</span></span>
+          </label>
+          <label class="choice">
+            <input type="radio" name="access" value="pairing" disabled />
+            <span>Require a pairing code <span class="hint">New devices enter a code shown here.</span></span>
+          </label>
+        </fieldset>
+        <label class="choice">
+          <input id="keep-awake" type="checkbox" disabled />
+          <span>Keep this computer awake while sharing</span>
+        </label>
+      </section>
+
+      <section id="devices-section" hidden>
+        <h2>Paired Devices</h2>
+        <ul id="devices" class="list"></ul>
+        <p id="no-devices" class="empty" hidden>
+          No devices paired yet. When a device asks to connect, its pairing code appears at the top
+          of this window.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <span id="data-dir"></span>
+      <span id="downloads"></span>
+    </footer>
+
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>
