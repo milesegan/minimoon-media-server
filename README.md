@@ -5,8 +5,7 @@ video with devices on the same network over the MiniMoon Media Protocol (MMP) v1
 [docs/minimoon-media-protocol-v1.md](docs/minimoon-media-protocol-v1.md).
 
 - **One index, one request.** Clients download the whole index of every shared folder, with a
-  weak ETag and `304 Not Modified`, keep a local copy, and choose on the device which shared
-  folders to show or copy.
+  weak ETag and `304 Not Modified`, and keep a local copy.
 - **Facts, not interpretation.** Tags are read with a copy of the apps' own tag reader, and
   video stream facts (codecs, HDR, Dolby Vision, tracks) with a native Rust reader.
 - **Read-only.** Nothing is ever written into the shared folders.

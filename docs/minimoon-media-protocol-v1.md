@@ -15,7 +15,7 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
 **Real advantages**
 
 1. **No administration.**
-   - **MMP:** a desktop app with a folder picker; each device chooses for itself which shared folders it shows or copies (§4). The server appears on the TV over Bonjour and works with no code, account or password. An optional pairing code comes in protocol 1.1 (§4).
+   - **MMP:** a desktop app with a folder picker, and every device sees everything in the chosen folders (§4). The server appears on the TV over Bonjour and works with no code, account or password. An optional pairing code comes in protocol 1.1 (§4).
    - **Jellyfin:** its setup wizard creates an admin account and libraries in a web dashboard.
    - **Plex:** needs a plex.tv account.
    - **Navidrome:** runs as a service and is configured by hand.
@@ -118,8 +118,7 @@ There is one household and no user accounts. Every client that can reach the ser
 ```
 
 - **One tree.** All shared folders (`sharedFolders`) are merged into a single tree, each appearing as a top-level folder. Each has a permanent `id` and a display `name`, which is only a label (§5, §8).
-- **Each client chooses what it follows.** The server publishes everything under its shared folders. Each client chooses for itself which shared folders (or paths within them) to include, and stores that choice on the device, never on the server, so changing it on one device doesn't affect any other: everything on the living-room Apple TV, only `Music` on a phone with little storage. A client that copies files (MiniMoon on iOS) filters the file list (§5) itself and downloads only what's chosen.
-- **Never switch on its own, never lose data.** A device that follows a subset keeps following exactly what it chose: a shared folder added later doesn't join it without asking, because on a phone that could start a very large download. If a shared folder a device follows is no longer listed (removed in the desktop app), the device keeps its copy of that folder's files, shows them as offline, and asks what to do; it never switches to other folders by itself. Devices remember shared folders by `id`, so renaming one changes nothing for them.
+- **Every client reads the whole index.** The server publishes everything under its shared folders, and every client reads all of it (§5). A client that copies files (MiniMoon on iOS) syncs the whole file list. There are no server-side or per-device subsets in v1.
 - **`sharedFolders[].available`** is false when that shared folder is unavailable (§5). Only the files under that folder go offline.
 - **`index`** holds the current ETags of the full index (`etag`) and of the file list (`filesEtag`) (§5), so a client polling `/v1/server` can tell whether anything changed without another request.
 - **Pairing mode:** an unpaired client gets the same response with `sharedFolders` and `index` omitted.
@@ -146,7 +145,6 @@ There is one household and no user accounts. Every client that can reach the ser
   - **A hash of the contents, never a counter.** The server derives it from a hash of the index's contents. A counter could restart after an index rebuild and repeat an old value for different contents.
 - **Client update:**
   - **Apply all or nothing.** The client applies an index only after it has downloaded and parsed it completely, and applies it in one transaction. A truncated download or a parse error leaves the previous copy untouched.
-  - **The device's choice filters first.** The client compares only the items under the shared folders or paths it chose (§4). Items it no longer follows are removed like any other.
   - **Compare by item `id`,** scoped to the server's `id`. Items in the local copy but not in the index were removed. Items new in the index were added. The client's own state key (below) is used only to look up its on-device state, never to decide which files exist, so two files that share a state key stay two files.
   - **Offline folders lose nothing.** For a shared folder listed in `offline`, the client adds and updates items from the response but never removes any. That holds whether the server sends its last snapshot or, after an index rebuild, no items for that folder at all. Removals under that folder are applied once it's back online.
   - **Metadata always comes from the newest index.** The client replaces every item's metadata (tags, audio, video facts) from each index it accepts, whether or not the file's size or mtime changed, so metadata corrected on the server reaches clients without any media being downloaded again.
@@ -179,7 +177,7 @@ There is one household and no user accounts. Every client that can reach the ser
   - **A scan that completes is the truth,** including a folder that's really empty: if it completes without errors, its removals are published.
   - **One step.** A completed scan replaces the folder's snapshot in a single database transaction, and the index ETags are computed after it. A client never sees half a scan.
   - **No previous snapshot.** On the first scan of a newly added folder, or after the server's index has been rebuilt from scratch, the folder is published only once a scan completes without errors. Until then it's listed as unavailable, not partial, and listed in `offline` with no items. That matters after a rebuild, when clients still hold copies the server no longer knows about: the client rule for offline folders (above) keeps them. A rebuild loses only the index; shared folders, their UUIDs and volume identities live in the server's settings (§8), so they survive it.
-- **Shared folder removed in the desktop app:** it drops out of `/v1/server` and its items drop out of the index. A device that followed it handles it as in §4: keep its copy as offline and ask.
+- **Shared folder removed in the desktop app:** it drops out of `/v1/server` and its items drop out of the index, so clients remove them through the normal comparison. Only a shared folder that is still listed but unavailable keeps its items on clients (`offline`, above).
 - **Size (estimated, not measured):** the example audio item below is about 650 bytes of JSON, so 40,000 tracks is roughly 25 MB, a few MB gzipped. A video item is somewhat larger because of its streams, but video libraries hold far fewer files. Parsing and comparing a 100,000-track library on an Apple TV should be measured before relying on it. If it proves too slow, a delta endpoint can be added later as an optional feature, since v1 changes are additive.
 
 **Wire schema**
@@ -325,8 +323,8 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 
 - **Shared folders:**
   - **Shared folders** are the folders on disk the user shares, added in the desktop app or with CLI flags. The Sync app has one today; MMP allows several. They're merged into one tree, each as a top-level folder.
-  - **Identity versus label.** Each shared folder gets a permanent UUID when it's added. Identity (§5), clients' choices (§4) and availability all use that UUID. Its display name defaults to the folder's name on disk; a clash gets a number added (`Music 2`). The user can rename it freely, since renaming changes only the label.
-  - **No server-side selections.** The Sync app's file-selection tree and presets aren't carried over. What each device shows or copies is chosen on that device (§4); the server publishes everything under its shared folders.
+  - **Identity versus label.** Each shared folder gets a permanent UUID when it's added. Identity (§5) and availability use that UUID. Its display name defaults to the folder's name on disk; a clash gets a number added (`Music 2`). The user can rename it freely, since renaming changes only the label.
+  - **No selections.** The Sync app's file-selection tree and presets aren't carried over. The server publishes everything under its shared folders, and every client reads all of it (§4).
 - **Enforcement:** an item is served (`/content`, `/art`, `/lyrics`, signed URLs) only if it's in the index: inside a shared folder and not filtered out (§9). Anything else, including an item that has since been removed, gets `404`, as if it didn't exist. Enforced by the server on every route, not only in listings.
 - **Index:**
   - **Contents:** a SQLite database in the app's data directory, holding files, folders, their metadata, and each shared folder's last snapshot.
@@ -374,7 +372,7 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
   - **1.0 mitigation:** the network name, and the pause control (§8).
   - **1.1:** the optional pairing code (§4).
   - **Possible later:** remember the network chosen at setup and pause sharing on any other. Reading the Wi-Fi name on recent macOS may need Location permission (from memory, not checked).
-- **A device's choice is not access control.** Which shared folders a device follows is decided and stored on that device; the server never sees it, and every client can read everything under the shared folders. Leaving a folder off a child's iPad doesn't stop that iPad, or any other device, from reading it. Files outside the shared folders are never served.
+- **No per-device restrictions.** Every client can read everything under the shared folders. Files outside them are never served.
 - **Nothing to damage.** Because no route writes, an unwanted client can read the published files but can't change, delete or add anything, or alter another device's state.
 - **Pairing mode (1.1):** a code shown on the server proves consent; every API call and media URL is authenticated, and revoking a device makes its next request fail and closes its open downloads (§4).
 - **Plain HTTP.** Media, and in pairing mode the token, can be sniffed by anyone on the same LAN.
@@ -406,7 +404,7 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
      - shared folders and their display names;
      - the sharing network and a pause control;
      - read-error and metadata-error reporting, and "Reindex everything".
-     The Sync app's selection tree and presets go away; choosing files moves to each device (§4).
+     The Sync app's selection tree and presets go away; every device gets everything under the shared folders (§4).
   7. **Tag reading, copied in.** Copy the reading side of `minimoon_tags` into the server (§8), and extend the copy with duration in milliseconds (the crate reports whole seconds, `properties.duration().as_secs()`) and a channel count. The apps' crate doesn't change.
   8. **Video reading in native Rust**, chosen by the reader test ([video-reader-test.md](video-reader-test.md), 2026-11-14):
      - **Crates:** `matroska-demuxer`, `mp4-atom`, `scuffle-h265`, `h264-reader`, `scuffle-av1`, and `lofty` for MP4 tags.
@@ -416,16 +414,14 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
      - **Placement:** in the server, next to the copied tag reader.
 - **Shared Swift client package:** used by both MiniMoon and Matinee, as a new Swift package with its own repo, since Matinee and MiniMoon are separate repos. It covers:
   - discovery (`NWBrowser`);
-  - the per-device choice of shared folders (or paths), stored on the device by shared folder `id`;
   - fetching `/v1/index` in either view with `If-None-Match`, and applying it all-or-nothing in one transaction, off the main actor;
   - comparing by item `id`, with app state keys kept for state lookups only;
   - the metadata rule;
-  - offline folders (never removing their items) and removed shared folders the device followed, shown as offline, never as deleted;
+  - offline folders, never removing their items;
   - content URLs with resumable downloads checked against `Content-Range`, and an error mapping.
 - **MiniMoon:**
-  - **iOS (copies files):** syncs from the file list (`?view=files`). It filters the list to the shared folders chosen on the device, downloads added and changed files and rescans them locally, as it does today against `/files`. This replaces its Sync-protocol client for MMP servers, with offline folders, resumable downloads and the per-device choice added.
+  - **iOS (copies files):** syncs from the file list (`?view=files`). It syncs the whole list, downloading added and changed files and rescans them locally, as it does today against `/files`. This replaces its Sync-protocol client for MMP servers, with offline folders and resumable downloads added.
   - **macOS and tvOS (no local copy):** an MMP `LibrarySource` mapping items from the full index to `Track` rows, plus fetch-to-cache playback.
-  - **Changing the choice** on a device removes the files no longer chosen from that device, through the normal comparison.
 - **Matinee:** an MMP source feeding `LibraryStore` the way a share does, filling `ProbeResult` from each item's `video` facts instead of probing, and matching streams to VLCKit tracks by `trackNumber`. It plays content URLs through VLCKit. Its existing share machinery (record keys, the state-worth-keeping rule, offline state, the title cap) applies.
 
 **Next (protocol 1.1, already designed above; the server side is built)**
@@ -491,7 +487,7 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 **Unverified**
 
 - Whether Jellyfin or OpenSubsonic have a change feed.
-- What users actually use Sync app presets for. Presets aren't migrated; anyone who switched presets to change what every device sees now chooses per device instead.
+- What users actually use Sync app presets for. Presets aren't migrated, so anyone who used them to limit what the iOS app copied now gets everything under the shared folders.
 - Index size and the time to parse and compare it on an Apple TV for a 100,000-track library (only estimated).
 - VLCKit and AVPlayer playback, seeking and recovery against this server's HTTP contract (the first step in §10), including whether either sends `If-Range` or checks the ETag across range requests.
 - Whether mtime checks see in-place changes promptly on network volumes the host mounts.
