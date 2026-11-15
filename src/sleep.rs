@@ -151,8 +151,9 @@ mod platform {
 
 #[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
+    // Braced, not a unit struct, so the shared `Assertion::default()` call passes clippy here too.
     #[derive(Default)]
-    pub struct Assertion;
+    pub struct Assertion {}
 
     impl Assertion {
         pub fn set(&mut self, _on: bool) {}
