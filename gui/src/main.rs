@@ -12,7 +12,7 @@ use minimoon_media_server::network::preferred_bind_ip;
 use minimoon_media_server::settings::{default_data_dir, AuthMode, PairedDevice};
 use minimoon_media_server::{MediaServer, ServerOptions};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, UserAttentionType, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -367,34 +367,47 @@ async fn rescan(app: State<'_, App>, id: Option<String>) -> Result<(), String> {
     .await
 }
 
+/// Shows `path` in the platform's file manager.
+fn reveal(path: &Path) -> Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let status = std::process::Command::new(opener)
+        .arg(path)
+        .status()
+        .with_context(|| format!("can't run {opener}"))?;
+    // Explorer exits with 1 even when it opened the folder.
+    if !status.success() && !cfg!(windows) {
+        bail!("can't open {}", path.display());
+    }
+    Ok(())
+}
+
 /// Opens a shared folder in the platform's file manager.
 #[tauri::command]
 async fn open_folder(app: State<'_, App>, id: String) -> Result<(), String> {
     let id = parse_id(&id)?;
     blocking(app.server()?, move |server| {
         let settings = server.library().settings();
-        let path = &settings
-            .folder(id)
-            .context("that folder isn't shared")?
-            .path;
-        let opener = if cfg!(target_os = "macos") {
-            "open"
-        } else if cfg!(windows) {
-            "explorer"
-        } else {
-            "xdg-open"
-        };
-        let status = std::process::Command::new(opener)
-            .arg(path)
-            .status()
-            .with_context(|| format!("can't run {opener}"))?;
-        // Explorer exits with 1 even when it opened the folder.
-        if !status.success() && !cfg!(windows) {
-            bail!("can't open {}", path.display());
-        }
-        Ok(())
+        let folder = settings.folder(id).context("that folder isn't shared")?;
+        reveal(&folder.path)
     })
     .await
+}
+
+/// Opens the data directory, with the settings and index, in the file manager.
+#[tauri::command]
+async fn show_data_folder(app: State<'_, App>) -> Result<(), String> {
+    let path = app.data_dir.clone();
+    // Works before the server is up too: a failed start is when the data folder matters most.
+    tauri::async_runtime::spawn_blocking(move || reveal(&path))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("{error:#}"))
 }
 
 #[tauri::command]
@@ -536,6 +549,7 @@ fn main() -> Result<()> {
             remove_folder,
             rescan,
             open_folder,
+            show_data_folder,
             reindex_everything,
             revoke_device,
         ])

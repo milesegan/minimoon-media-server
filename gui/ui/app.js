@@ -16,8 +16,28 @@ const openFolderLabel = /Mac/.test(platform)
     ? "Open in File Explorer"
     : "Open Folder";
 
-const FOLDER_ICON = `<svg class="row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.38a1.5 1.5 0 0 1 1.06.44L11.5 7h8A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>`;
-const MORE_ICON = `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg>`;
+const svg = (body, viewBox = "0 0 24 24", cls = "") =>
+  `<svg${cls ? ` class="${cls}"` : ""} viewBox="${viewBox}" aria-hidden="true">${body}</svg>`;
+const FOLDER_ICON = svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>');
+const MORE_ICON = svg('<circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/>', "0 0 16 16");
+const CLOSE_ICON = svg('<path d="M6 6l12 12M18 6L6 18"/>', "0 0 24 24", "stroke");
+const CHEVRON_ICON = svg('<path d="M9 6l6 6-6 6"/>');
+const DEVICE_ICONS = {
+  tv: svg('<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8"/>'),
+  computer: svg('<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>'),
+  tablet: svg('<rect x="5" y="3" width="14" height="18" rx="2.5"/><path d="M11 18h2"/>'),
+  phone: svg('<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M11 18h2"/>'),
+};
+
+/** Which picture suits a device, from the free-form platform its app reports. */
+function deviceKind(platform) {
+  if (/tv|roku|tizen|webos|fire ?stick/i.test(platform)) return "tv";
+  if (/ipad|tablet/i.test(platform)) return "tablet";
+  if (/mac|windows|linux|desktop|chrome ?os|web/i.test(platform)) return "computer";
+  return "phone";
+}
+
+const plural = (count, one, many = `${one}s`) => `${numbers.format(count)} ${count === 1 ? one : many}`;
 
 /** The last status from the backend. */
 let current = null;
@@ -94,57 +114,75 @@ function render() {
   const server = current.server;
   const ready = current.phase === "running" && pending === 0;
 
-  const state = $("#state");
-  state.className = "state";
-  let stateText = "Sharing";
-  if (current.phase === "starting") {
-    stateText = "Starting…";
-  } else if (current.phase === "failed") {
-    stateText = "Not running";
-    state.classList.add("failed");
-  } else if (server.paused) {
-    stateText = "Paused";
-  } else {
-    state.classList.add("sharing");
-  }
-  $("#state-text").textContent = stateText;
-
-  const downloads = server?.paused ? 0 : (server?.downloads ?? 0);
-  const streams = $("#streams");
-  streams.hidden = downloads === 0;
-  streams.textContent = downloads === 1 ? "1 stream playing" : `${downloads} streams playing`;
-
-  const address = $("#address");
-  address.hidden = !server?.address || server.paused;
-  address.textContent = (server?.address ?? "").replace(/^https?:\/\//, "");
+  renderBand(server, ready);
 
   $("#failure").hidden = current.phase !== "failed";
   $("#failure-text").textContent = current.error ?? "";
   $("#paused-banner").hidden = !server?.paused;
 
-  const pause = $("#pause");
-  pause.disabled = !ready;
-  pause.textContent = server?.paused ? "Resume Sharing" : "Pause Sharing";
-  pause.classList.toggle("primary", !!server?.paused);
-
+  $("#maintenance").hidden = !server;
   for (const id of ["#add-folder", "#add-first-folder", "#rescan-all", "#reindex"]) {
     $(id).disabled = !ready;
   }
+  $("#data-dir").title = current.dataDir ? `Settings and index: ${current.dataDir}` : "";
+  $("#data-dir").hidden = !current.dataDir;
 
-  $("#data-dir").textContent = current.dataDir ? `Settings and index: ${current.dataDir}` : "";
-  $("#data-dir").title = current.dataDir;
-
-  // Settings mean nothing until the server runs; the header and banners say why.
+  // Settings mean nothing until the server runs; the band and banners say why.
   $("main").hidden = !server;
   if (!server) return;
   document.title = `${server.name} – MiniMoon Media Server`;
   $("#server-name").textContent = server.name;
+  $("#server-name").title = server.name;
   renderSettings(server, ready);
   renderFolders(server.folders, ready);
   renderDevices(server, ready);
   dismissPairedRequests(server.devices);
   // Switches animate from here on, not from their initial state.
   requestAnimationFrame(() => document.body.classList.add("loaded"));
+}
+
+function renderBand(server, ready) {
+  let state = "sharing";
+  let stateText = "Sharing on this network";
+  if (current.phase === "starting") {
+    state = "starting";
+    stateText = "Starting…";
+  } else if (current.phase === "failed") {
+    state = "failed";
+    stateText = "Not running";
+  } else if (server.paused) {
+    state = "paused";
+    stateText = "Paused";
+  }
+  $("#state").className = `state ${state}`;
+  $("#state-text").textContent = stateText;
+
+  const pause = $("#pause");
+  pause.hidden = !server;
+  pause.disabled = !ready;
+  pause.textContent = server?.paused ? "Resume Sharing" : "Pause Sharing";
+  pause.classList.toggle("resume", !!server?.paused);
+
+  $("#figures").hidden = !server;
+  if (!server) return;
+
+  // Pausing closes the listener, so there's no address until sharing resumes.
+  const address = server.address ?? "";
+  $("#address").hidden = !address;
+  $("#address-text").textContent = address.replace(/^https?:\/\//, "");
+  $("#no-address").hidden = !!address;
+  $("#no-address").textContent = server.paused ? "Off while paused" : "Not available";
+
+  const downloads = server.paused ? 0 : server.downloads;
+  const streams = $("#streams");
+  streams.textContent = downloads === 0 ? "Nothing" : plural(downloads, "stream");
+  streams.classList.toggle("none", downloads === 0);
+
+  const shared = server.folders.filter((folder) => folder.shared);
+  const library = $("#library");
+  library.textContent =
+    shared.length === 0 ? "Nothing shared" : plural(shared.reduce((sum, folder) => sum + folder.files, 0), "file");
+  library.classList.toggle("none", shared.length === 0);
 }
 
 function renderSettings(server, ready) {
@@ -155,13 +193,14 @@ function renderSettings(server, ready) {
     // With no saved name, the display name is the host name.
     if (!server.customName) name.placeholder = server.name;
   }
-  for (const radio of document.querySelectorAll('input[name="access"]')) {
-    radio.disabled = !ready;
-    if (pending === 0) radio.checked = radio.value === (server.pairing ? "pairing" : "open");
+  for (const [id, on] of [
+    ["#pairing", server.pairing],
+    ["#keep-awake", server.keepAwake],
+  ]) {
+    const toggle = $(id);
+    toggle.disabled = !ready;
+    if (pending === 0) toggle.checked = on;
   }
-  const keepAwake = $("#keep-awake");
-  keepAwake.disabled = !ready;
-  if (pending === 0) keepAwake.checked = server.keepAwake;
 }
 
 /** Puts `rows` in `list` in order, creating and removing elements as needed. */
@@ -200,32 +239,31 @@ function renderFolders(folders, ready) {
 
 function createFolderRow(id) {
   const el = document.createElement("li");
+  el.className = "folder";
   el.innerHTML = `
-    ${FOLDER_ICON}
-    <div class="row-main">
-      <div class="row-title"><span class="name"></span><input class="rename" type="text" spellcheck="false" hidden /></div>
-      <div class="row-sub path"></div>
-      <div class="folder-status"><span class="dot"></span><span class="text"></span></div>
-      <div class="activity" hidden><div class="progress"><div class="bar"></div></div><span class="label"></span></div>
-      <details class="errors" hidden><summary></summary><ul></ul></details>
-    </div>
-    <div class="row-actions">
+    <div class="row">
+      <span class="chip">${FOLDER_ICON}</span>
+      <div class="row-main">
+        <div class="row-title"><span class="name"></span><input class="rename" type="text" spellcheck="false" aria-label="Folder name" hidden /></div>
+        <div class="row-sub path"></div>
+      </div>
+      <div class="status"><div></div><div></div></div>
       <button class="icon more" title="Folder actions" aria-label="Folder actions" aria-haspopup="menu">${MORE_ICON}</button>
-    </div>`;
+    </div>
+    <div class="progress" role="progressbar" hidden><div class="bar"></div></div>
+    <details class="errors" hidden><summary>${CHEVRON_ICON}<span></span></summary><ul></ul></details>`;
   const row = {
     el,
-    icon: el.querySelector(".row-icon"),
     name: el.querySelector(".name"),
     input: el.querySelector(".rename"),
     path: el.querySelector(".path"),
-    dot: el.querySelector(".dot"),
-    text: el.querySelector(".text"),
-    activity: el.querySelector(".activity"),
+    status: el.querySelector(".status"),
+    main: el.querySelector(".status > :first-child"),
+    sub: el.querySelector(".status > :last-child"),
     progress: el.querySelector(".progress"),
-    bar: el.querySelector(".bar"),
-    activityLabel: el.querySelector(".activity .label"),
+    bar: el.querySelector(".progress .bar"),
     errors: el.querySelector(".errors"),
-    summary: el.querySelector(".errors summary"),
+    summary: el.querySelector(".errors summary span"),
     errorList: el.querySelector(".errors ul"),
     errorText: "",
     more: el.querySelector(".more"),
@@ -288,6 +326,13 @@ function createFolderRow(id) {
   return row;
 }
 
+/** Sets one line of a folder's status column: its text and how it reads. */
+function statusLine(el, text, tone = "") {
+  el.className = tone;
+  el.textContent = text;
+  el.hidden = !text;
+}
+
 function updateFolderRow(row, folder, ready) {
   if (!editing.has(folder.id)) row.name.textContent = folder.name;
   // The marks keep the path left to right inside the right-to-left box that trims its start.
@@ -296,29 +341,50 @@ function updateFolderRow(row, folder, ready) {
   row.name.title = ready ? "Double-click to rename" : "";
   row.more.disabled = !ready;
 
-  const parts = [];
-  if (folder.shared) {
-    parts.push("Shared", `${numbers.format(folder.files)} ${folder.files === 1 ? "file" : "files"}`);
+  // Healthy folders show only their size; anything else replaces or follows it.
+  const files = plural(folder.files, "file");
+  const offline = !folder.shared && !!folder.note?.startsWith("Offline");
+  row.el.classList.toggle("offline", offline);
+  if (offline) {
+    row.main.className = "";
+    row.main.replaceChildren(Object.assign(document.createElement("span"), { className: "pill", textContent: "Offline" }));
+    row.main.hidden = false;
+    statusLine(row.sub, folder.note.replace(/^Offline:?\s*/, ""));
+  } else if (folder.activity) {
+    statusLine(row.main, folder.activity, "busy");
+    if (folder.progress) {
+      const [done, total] = folder.progress;
+      statusLine(row.sub, `${numbers.format(done)} of ${numbers.format(total)}`);
+    } else {
+      statusLine(row.sub, folder.files > 0 ? files : "");
+    }
+  } else if (!folder.shared) {
+    // "Not shared: why" is a problem, split over the two lines; waiting to be indexed isn't.
+    const [, why] = folder.note?.match(/^Not shared: (.*)$/s) ?? [];
+    statusLine(row.main, why ? "Not shared" : (folder.note ?? "Not shared"), why ? "warn" : "quiet");
+    statusLine(row.sub, why ?? "");
   } else {
-    parts.push(folder.note);
+    statusLine(row.main, files);
+    statusLine(
+      row.sub,
+      folder.unreadable > 0 ? `${numbers.format(folder.unreadable)} with unreadable metadata` : "",
+      "warn",
+    );
   }
-  if (folder.unreadable > 0) {
-    parts.push(`${numbers.format(folder.unreadable)} with unreadable metadata`);
-  }
-  row.text.textContent = parts.join(" · ");
-  const offline = !folder.shared && folder.note?.startsWith("Offline");
-  row.dot.className = `dot ${folder.shared ? "ok" : folder.activity ? "busy" : "warn"}`;
-  row.icon.classList.toggle("offline", offline);
+  row.status.title = [row.main.textContent, row.sub.textContent].filter(Boolean).join("\n");
 
-  row.activity.hidden = !folder.activity;
-  row.progress.classList.toggle("indeterminate", !!folder.activity && !folder.progress);
+  row.progress.hidden = !folder.activity || offline;
+  row.progress.classList.toggle("indeterminate", !folder.progress);
+  row.progress.setAttribute("aria-label", folder.activity ?? "");
   if (folder.activity && folder.progress) {
     const [done, total] = folder.progress;
     row.bar.style.width = total > 0 ? `${(100 * done) / total}%` : "0";
-    row.activityLabel.textContent = `${folder.activity} · ${numbers.format(done)} of ${numbers.format(total)}`;
+    row.progress.setAttribute("aria-valuemax", total);
+    row.progress.setAttribute("aria-valuenow", done);
   } else {
     row.bar.style.width = "";
-    row.activityLabel.textContent = folder.activity ? `${folder.activity}…` : "";
+    row.progress.removeAttribute("aria-valuemax");
+    row.progress.removeAttribute("aria-valuenow");
   }
 
   // Rebuilt only when it changes, so an open list stays open.
@@ -345,27 +411,37 @@ function pairedText(pairedAt) {
 
 function renderDevices(server, ready) {
   const devices = server.devices;
-  $("#devices-section").hidden = !server.pairing && devices.length === 0;
-  $("#no-devices").hidden = devices.length > 0;
+  $("#no-devices").hidden = !server.pairing || devices.length > 0;
   $("#devices").hidden = devices.length === 0;
   reconcile($("#devices"), deviceRows, devices, (device) => device.clientId, createDeviceRow, (row, device) => {
+    const kind = deviceKind(device.platform);
+    if (row.kind !== kind) {
+      row.kind = kind;
+      row.chip.innerHTML = DEVICE_ICONS[kind];
+    }
     row.name.textContent = device.clientName;
     row.sub.textContent = `${device.app} on ${device.platform} · ${pairedText(device.pairedAt)}`;
     row.sub.title = `Paired ${dates.format(new Date(device.pairedAt))}`;
     row.revoke.disabled = !ready;
+    row.revoke.setAttribute("aria-label", `Revoke ${device.clientName}…`);
   });
 }
 
 function createDeviceRow(clientId) {
   const el = document.createElement("li");
   el.innerHTML = `
-    <div class="row-main">
-      <div class="row-title"></div>
-      <div class="row-sub"></div>
-    </div>
-    <div class="row-actions"><button class="small">Revoke…</button></div>`;
+    <div class="row">
+      <span class="chip neutral"></span>
+      <div class="row-main">
+        <div class="row-title"></div>
+        <div class="row-sub"></div>
+      </div>
+      <button class="text-button">Revoke…</button>
+    </div>`;
   const row = {
     el,
+    kind: null,
+    chip: el.querySelector(".chip"),
     name: el.querySelector(".row-title"),
     sub: el.querySelector(".row-sub"),
     revoke: el.querySelector("button"),
@@ -379,33 +455,45 @@ function createDeviceRow(clientId) {
 function showPairing(request) {
   if (pairings.has(request.pairingId)) return;
   const el = document.createElement("div");
-  el.className = "banner pairing";
+  el.className = "pairing";
+  el.setAttribute("role", "group");
   el.innerHTML = `
-    <div class="pairing-body">
-      <div class="who">
-        <strong class="title"></strong>
-        <span class="row-sub"></span>
+    <div class="who">
+      <strong class="title"></strong>
+      <span class="instruction"></span>
+      <div class="time" aria-live="off">
+        <div class="track" aria-hidden="true"><div class="bar"></div></div>
+        <span class="left"></span>
       </div>
-      <div class="code" title="Enter this code on the device"></div>
-      <button class="small">Dismiss</button>
     </div>
-    <div class="countdown"></div>`;
+    <div class="code-and-close">
+      <div class="code" role="img" title="Enter this code on the device"></div>
+      <button class="icon dismiss" title="Dismiss" aria-label="Dismiss">${CLOSE_ICON}</button>
+    </div>`;
   const shown = Date.now();
   const lifetime = request.expiresInSecs * 1000;
   const expires = shown + lifetime;
-  const sub = el.querySelector(".row-sub");
-  const countdown = el.querySelector(".countdown");
-  el.querySelector(".title").textContent = `${request.clientName} wants to connect`;
+  const left = el.querySelector(".left");
+  const bar = el.querySelector(".bar");
+  const title = `${request.clientName} wants to connect`;
+  el.querySelector(".title").textContent = title;
+  el.setAttribute("aria-label", title);
+  el.querySelector(".instruction").textContent = `Enter this code in ${request.app} on the ${request.platform} device.`;
   const code = request.code;
-  el.querySelector(".code").textContent = `${code.slice(0, 3)} ${code.slice(3)}`;
+  const digits = el.querySelector(".code");
+  digits.setAttribute("aria-label", `Pairing code ${code.slice(0, 3)} ${code.slice(3)}`);
+  [...code].forEach((digit, index) => {
+    if (index === 3) digits.append(Object.assign(document.createElement("span"), { className: "gap" }));
+    digits.append(Object.assign(document.createElement("span"), { className: "digit", textContent: digit }));
+  });
 
   const tick = () => {
-    const left = Math.max(0, Math.round((expires - Date.now()) / 1000));
-    if (left === 0) return remove();
-    const minutes = Math.floor(left / 60);
-    const seconds = String(left % 60).padStart(2, "0");
-    sub.textContent = `Enter this code in ${request.app} on the ${request.platform} device · ${minutes}:${seconds} left`;
-    countdown.style.transform = `scaleX(${(expires - Date.now() - 1000) / lifetime})`;
+    const secondsLeft = Math.max(0, Math.round((expires - Date.now()) / 1000));
+    if (secondsLeft === 0) return remove();
+    const minutes = Math.floor(secondsLeft / 60);
+    const seconds = String(secondsLeft % 60).padStart(2, "0");
+    left.textContent = `${minutes}:${seconds} left`;
+    bar.style.transform = `scaleX(${Math.max(0, (expires - Date.now() - 1000) / lifetime)})`;
   };
   const timer = setInterval(tick, 1000);
   const remove = () => {
@@ -413,7 +501,7 @@ function showPairing(request) {
     el.remove();
     pairings.delete(request.pairingId);
   };
-  el.querySelector("button").addEventListener("click", remove);
+  el.querySelector(".dismiss").addEventListener("click", remove);
   pairings.set(request.pairingId, { clientName: request.clientName, shown, remove });
   tick();
   $("#pairings").append(el);
@@ -438,6 +526,14 @@ $("#rescan-all").addEventListener("click", () => run("rescan", { id: null }));
 $("#reindex").addEventListener("click", async () => {
   if ((await run("reindex_everything")) !== FAILED) toast("Reindexing in the background");
 });
+// Not gated on the server: after a failed start, the data folder is where to look.
+$("#data-dir").addEventListener("click", async () => {
+  try {
+    await invoke("show_data_folder");
+  } catch (error) {
+    toast(String(error), { error: true });
+  }
+});
 $("#address").addEventListener("click", async () => {
   const address = current?.server?.address;
   if (!address) return;
@@ -459,9 +555,7 @@ nameInput.addEventListener("keydown", (event) => {
 });
 nameInput.addEventListener("change", () => run("set_name", { name: nameInput.value }));
 
-for (const radio of document.querySelectorAll('input[name="access"]')) {
-  radio.addEventListener("change", () => run("set_pairing", { on: radio.value === "pairing" }));
-}
+$("#pairing").addEventListener("change", (event) => run("set_pairing", { on: event.target.checked }));
 $("#keep-awake").addEventListener("change", (event) => run("set_keep_awake", { on: event.target.checked }));
 
 // The webview's own menu (Reload, Inspect) means nothing here.
