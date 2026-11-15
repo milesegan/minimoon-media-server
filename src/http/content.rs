@@ -158,8 +158,9 @@ struct Opened {
     canonical: PathBuf,
 }
 
-fn open(path: PathBuf) -> std::io::Result<Opened> {
-    let file = std::fs::File::open(&path)?;
+/// Opens an item's file without following a link anywhere below its shared folder (spec §9).
+fn open(root: PathBuf, relative: Arc<str>, path: PathBuf) -> std::io::Result<Opened> {
+    let file = scan::open_inside(&root, &relative)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(std::io::ErrorKind::NotFound.into());
@@ -180,11 +181,7 @@ pub fn content_etag(size: u64, mtime_ns: i64, rev: u64) -> String {
 
 /// Resolves an item to its file, answering `503 folder_unavailable` or `404` when it can't be
 /// served.
-pub fn locate(
-    state: &AppState,
-    item: &ServedItem,
-    folder: Option<&PublishedFolder>,
-) -> Result<PathBuf, Response> {
+pub fn locate(item: &ServedItem, folder: Option<&PublishedFolder>) -> Result<PathBuf, Response> {
     let Some(folder) = folder else {
         return Err(error(StatusCode::NOT_FOUND, "not_found", "no such item"));
     };
@@ -195,7 +192,7 @@ pub fn locate(
             "the item's shared folder is unavailable",
         ));
     }
-    scan::resolve(&folder.root, &item.path, state.scan_options)
+    scan::resolve(&folder.root, &item.path)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "not_found", "no such item"))
 }
 
@@ -208,11 +205,14 @@ pub async fn serve(
     client: Option<String>,
 ) -> Response {
     let published = state.published();
-    let path = match locate(state, item, published.folder(item.folder)) {
+    let folder = published.folder(item.folder);
+    let path = match locate(item, folder) {
         Ok(path) => path,
         Err(response) => return response,
     };
-    let opened = match tokio::task::spawn_blocking(move || open(path)).await {
+    let root = folder.map(|folder| folder.root.clone()).unwrap_or_default();
+    let relative = item.path.clone();
+    let opened = match tokio::task::spawn_blocking(move || open(root, relative, path)).await {
         Ok(Ok(opened)) => opened,
         _ => return error(StatusCode::NOT_FOUND, "not_found", "no such item"),
     };

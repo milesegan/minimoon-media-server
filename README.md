@@ -45,15 +45,13 @@ Options:
 - `--name <name>`: the display name devices see (saved). The host name by default.
 - `--pairing` / `--open`: require a pairing code for new devices, or let any device on the
   network connect (saved).
-- `--exclude <subfolder>` / `--include <subfolder>`: publish a shared folder without one of
-  its subfolders, or undo that (saved). A folder with a subfolder the server can't read isn't
-  published until the subfolder is readable or excluded; the server prints which paths
-  failed.
-- `--follow-external-symlinks`: follow links that point outside the shared folders. Links
-  inside them are always followed.
 - `--no-bonjour`: don't advertise `_mmserver._tcp` over Bonjour.
 - `--reindex`: re-read every file's metadata in the background.
 - `-v`, `--verbose`: log requests and scans.
+
+Anything in a shared folder the server can't read is treated as not there, and the server
+prints which paths failed. Symbolic links are never followed, wherever they point: to share a
+drive or another folder, add it as a shared folder of its own.
 
 ## HTTP API
 
@@ -80,8 +78,8 @@ All routes are under `/v1`; see the spec for the full contract.
   doesn't read again; ids and `rev` values come back unchanged.
 - **Scanning:** a full scan at startup and every 30 minutes, and a debounced rescan after file
   events. Before and after each walk the folder's volume is checked, so an unplugged drive
-  never looks like deleted files. A walk with any error publishes nothing for that folder, and
-  a completed scan is published in one step, once the metadata of every new or changed file
+  never looks like deleted files. Anything a walk can't read is treated as not there, and a
+  completed scan is published in one step, once the metadata of every new or changed file
   has been read.
 - **`rev`:** a file written in place with its size and mtime unchanged (some taggers put the
   old mtime back) gets a new `rev` when the watcher reported the write and the file's ctime
@@ -107,6 +105,6 @@ let server = MediaServer::start(ServerOptions::new(LibraryOptions::new(data_dir)
 let folder = server.library().add_shared_folder(path, None)?;
 ```
 
-`Library` covers shared folders (add, rename, remove, publish without unreadable subfolders),
+`Library` covers shared folders (add, rename, remove),
 "Reindex everything" and per-folder status with error counts. `MediaServer` adds pausing,
 pairing mode, paired devices and revocation, the display name and "Keep this computer awake".

@@ -1,4 +1,4 @@
-//! Pairing, tokens and signed media URLs (spec §4, protocol 1.1).
+//! Pairing, tokens and signed media URLs (spec §4).
 //!
 //! The server shows a six-digit code; the client sends it back once and gets a bearer token,
 //! stored hashed in the settings. Players that can't set headers get signed URLs, bound to the

@@ -11,7 +11,6 @@ pub mod pairing;
 
 use crate::library::{Library, ServerEvent, WriteLog};
 use crate::published::Published;
-use crate::scan::ScanOptions;
 use crate::settings::AuthMode;
 use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -30,7 +29,7 @@ use uuid::Uuid;
 
 /// The protocol version this server speaks.
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 1;
+pub const PROTOCOL_MINOR: u32 = 0;
 /// Optional parts this server supports.
 pub const FEATURES: &[&str] = &["art-resize", "events"];
 
@@ -42,7 +41,6 @@ pub struct AppState {
     pub write_log: Arc<WriteLog>,
     pub downloads: Arc<content::Downloads>,
     pub pairing: Arc<pairing::Pairing>,
-    pub scan_options: ScanOptions,
     pub art_cache_dir: PathBuf,
     pub software_version: String,
 }

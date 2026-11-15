@@ -9,7 +9,7 @@
 //! Scan safety (spec §5):
 //! - before and after every walk, the folder's volume is checked; a failed check marks the
 //!   folder unavailable and keeps its last snapshot;
-//! - a walk with any error publishes nothing for that folder;
+//! - whatever a walk can't read is treated as not there;
 //! - a completed scan, with the metadata of every new or changed file read, replaces the
 //!   folder's snapshot in one database transaction and one publication;
 //! - a folder with no snapshot yet is unavailable until its first scan completes.
@@ -18,7 +18,7 @@ use crate::index::{Change, FileRecord, IndexStore, ReadStatus, Snapshot};
 use crate::model::ReadError;
 use crate::published::{self, FolderView, ItemCache, Published};
 use crate::reader::{self, file_type, reader_version, Reader};
-use crate::scan::{self, ScanError, ScanOptions, ScanResult};
+use crate::scan::{self, ScanError, ScanResult};
 use crate::settings::{Settings, SharedFolderSettings};
 use crate::volume::{self, VolumeIdentity};
 use crate::watch::{Batch, WatchEvent, Watcher};
@@ -46,7 +46,7 @@ const DEBOUNCE: Duration = Duration::from_secs(2);
 const DEBOUNCE_CAP: Duration = Duration::from_secs(10);
 /// How often each folder's volume is checked between scans.
 const VOLUME_CHECK_INTERVAL: Duration = Duration::from_secs(15);
-/// After a scan error, the next attempt waits this long.
+/// After a folder becomes unavailable during a scan, the next attempt waits this long.
 const ERROR_RETRY: Duration = Duration::from_secs(60);
 /// The stored FSEvents event id is written at most this often.
 const EVENT_ID_SAVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -56,7 +56,6 @@ const EVENT_ID_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 pub struct LibraryOptions {
     /// The server's data directory: settings, the index and caches.
     pub data_dir: PathBuf,
-    pub scan: ScanOptions,
     /// A metadata read taking longer than this counts as a temporary failure.
     pub read_timeout: Duration,
     /// A full rescan of every folder this often, on top of watching.
@@ -71,7 +70,6 @@ impl LibraryOptions {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
-            scan: ScanOptions::default(),
             read_timeout: Duration::from_secs(60),
             rescan_interval: Duration::from_secs(30 * 60),
             workers: 4,
@@ -145,9 +143,8 @@ pub struct SharedFolderStatus {
     pub outdated_total: usize,
     /// Folders or files the last scan couldn't read; the folder's previous snapshot is kept.
     pub scan_errors: Vec<ScanError>,
-    /// Consecutive scans that failed with errors.
+    /// Consecutive scans that found the folder unavailable partway through.
     pub failed_scans: u32,
-    pub excluded: Vec<Vec<String>>,
     pub files: usize,
     /// Files whose metadata read failed temporarily and will be retried.
     pub temporary_failures: usize,
@@ -293,6 +290,8 @@ struct Plan {
     reads: usize,
     results: HashMap<String, FileRecord>,
     bumped: bool,
+    /// Subfolders and files the walk couldn't read, so treated as not there.
+    errors: Vec<ScanError>,
 }
 
 enum Phase {
@@ -646,7 +645,6 @@ impl Core {
 
     fn maybe_start_scan(&mut self, id: Uuid, now: Instant) {
         let interval = self.options.rescan_interval;
-        let options = self.options.scan;
         let Some(settings) = self.settings.folder(id).cloned() else {
             return;
         };
@@ -675,11 +673,10 @@ impl Core {
         state.phase = Phase::Walking { token, writes };
         let root = settings.path.clone();
         let identity = settings.volume.clone();
-        let excluded = settings.excluded.clone();
         let _ = std::thread::Builder::new()
             .name("mmp-scan".into())
             .spawn(move || {
-                let result = walk(&root, &identity, options, &excluded);
+                let result = walk(&root, &identity);
                 let _ = tx.send(Msg::ScanDone {
                     folder: id,
                     token,
@@ -703,32 +700,26 @@ impl Core {
         };
         state.phase = Phase::Idle;
         let result = match result {
-            Ok(result) if result.errors.is_empty() => result,
-            outcome => {
+            Ok(result) => result,
+            Err(unavailable) => {
                 // Nothing is published; the writes wait for the next scan.
+                tracing::warn!("folder became unavailable during a scan: {unavailable}");
                 state.pending_writes.extend(writes);
                 state.failures += 1;
                 state.scan_due = Some(Instant::now() + ERROR_RETRY);
-                match outcome {
-                    Err(unavailable) => {
-                        tracing::warn!("folder became unavailable during a scan: {unavailable}");
-                        state.volume_ok = false;
-                        state.unavailable = Some(unavailable);
-                        state.last_volume_check = Some(Instant::now());
-                        self.publish_due = true;
-                    }
-                    Ok(result) => {
-                        tracing::warn!(
-                            "scan of a shared folder had {} error(s); keeping its previous files",
-                            result.errors.len()
-                        );
-                        state.scan_errors = result.errors;
-                    }
-                }
+                state.volume_ok = false;
+                state.unavailable = Some(unavailable);
+                state.last_volume_check = Some(Instant::now());
+                self.publish_due = true;
                 return;
             }
         };
-
+        if !result.errors.is_empty() {
+            tracing::warn!(
+                "{} part(s) of a shared folder couldn't be read, so they aren't shared",
+                result.errors.len()
+            );
+        }
         let empty = Snapshot::new();
         let previous = state.snapshot.as_ref().unwrap_or(&empty);
         let scanned_paths: HashSet<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
@@ -787,6 +778,7 @@ impl Core {
             reads: to_read.len(),
             results: HashMap::new(),
             bumped: !bumps.is_empty(),
+            errors: result.errors,
         };
         let root = self
             .settings
@@ -864,8 +856,8 @@ impl Core {
         if let Err(error) = self.store.apply(id, &changes, now_ms()) {
             tracing::error!("can't write the index: {error:#}");
         }
-        state.scan_errors.clear();
         state.failures = 0;
+        state.scan_errors = plan.errors;
         let changed = !changes.is_empty() || state.snapshot_was_missing();
         state.snapshot = Some(snapshot);
         let snapshot = state.snapshot.as_ref().expect("just set");
@@ -1200,7 +1192,6 @@ impl Core {
                 .map_or(0, |s| s.outdated_total),
             scan_errors: state.map(|s| s.scan_errors.clone()).unwrap_or_default(),
             failed_scans: state.map_or(0, |s| s.failures),
-            excluded: folder.excluded.clone(),
             files: snapshot.map_or(0, |s| s.len()),
             temporary_failures: temporary,
             unreadable,
@@ -1222,14 +1213,9 @@ impl FolderState {
 
 /// Lists a folder after checking its volume, and checks the volume again afterwards, so a drive
 /// that dropped partway through never looks like deleted files.
-fn walk(
-    root: &Path,
-    identity: &VolumeIdentity,
-    options: ScanOptions,
-    excluded: &[Vec<String>],
-) -> std::result::Result<ScanResult, String> {
+fn walk(root: &Path, identity: &VolumeIdentity) -> std::result::Result<ScanResult, String> {
     volume::check(root, identity).map_err(|reason| reason.to_string())?;
-    let result = scan::scan(root, options, excluded);
+    let result = scan::scan(root);
     volume::check(root, identity).map_err(|reason| reason.to_string())?;
     Ok(result)
 }
@@ -1395,10 +1381,6 @@ impl Library {
         self.lock().options.data_dir.clone()
     }
 
-    pub fn scan_options(&self) -> ScanOptions {
-        self.lock().options.scan
-    }
-
     /// A copy of the settings.
     pub fn settings(&self) -> Settings {
         self.lock().settings.clone()
@@ -1470,7 +1452,6 @@ impl Library {
             path: canonical.clone(),
             name: core.settings.unique_folder_name(&base),
             volume: VolumeIdentity::of(&canonical)?,
-            excluded: Vec::new(),
         };
         let id = folder.id;
         core.folders.insert(id, FolderState::new(&folder, None));
@@ -1517,24 +1498,6 @@ impl Library {
         folder.name = name.to_string();
         core.save_settings();
         core.publish_due = true;
-        drop(core);
-        self.kick();
-        Ok(())
-    }
-
-    /// Sets the subfolders published without after they couldn't be read (spec §5): an explicit
-    /// choice by the user, never a silent partial publish.
-    pub fn set_excluded(&self, id: Uuid, excluded: Vec<Vec<String>>) -> Result<()> {
-        let mut core = self.lock();
-        let folder = core
-            .settings
-            .shared_folders
-            .iter_mut()
-            .find(|folder| folder.id == id)
-            .with_context(|| format!("no shared folder {id}"))?;
-        folder.excluded = excluded;
-        core.save_settings();
-        core.schedule_scan(id, Duration::ZERO);
         drop(core);
         self.kick();
         Ok(())

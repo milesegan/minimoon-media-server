@@ -120,7 +120,7 @@ pub async fn art(
         Err(response) => return response,
     };
     let published = state.published();
-    let path = match super::content::locate(state, item, published.folder(item.folder)) {
+    let path = match super::content::locate(item, published.folder(item.folder)) {
         Ok(path) => path,
         Err(response) => return response,
     };
@@ -266,7 +266,7 @@ pub async fn lyrics(
     head: bool,
 ) -> Response {
     let published = state.published();
-    let path = match super::content::locate(state, item, published.folder(item.folder)) {
+    let path = match super::content::locate(item, published.folder(item.folder)) {
         Ok(path) => path,
         Err(response) => return response,
     };

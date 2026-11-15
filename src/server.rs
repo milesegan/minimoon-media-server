@@ -78,7 +78,6 @@ impl MediaServer {
             write_log: library.write_log(),
             downloads: Arc::new(Downloads::new(activity.clone())),
             pairing: Arc::new(Pairing::default()),
-            scan_options: library.scan_options(),
             art_cache_dir: library.data_dir().join("art-cache"),
             software_version: options.software_version.clone(),
         };

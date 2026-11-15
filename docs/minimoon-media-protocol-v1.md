@@ -1,11 +1,11 @@
 # MiniMoon Media Protocol (MMP) v1: proposal
 
-Status: revised 2026-11-15. The server side of protocols 1.0 and 1.1 is built in this repository (§10 lists what's done and what isn't). The shared client package and the apps' support aren't built.
+Status: revised 2026-11-15. The server side of protocol 1.0 is built in this repository (§10 lists what's done and what isn't). The shared client package and the apps' support aren't built.
 
 - **Server:** minimoon-media-server, the renamed minimoon-sync.
 - **Clients:** MiniMoon (macOS, iOS, tvOS) and Matinee (tvOS, macOS).
 - **MMP only:** the server speaks only MMP. The Sync app's protocol (`/files`, `/file-by-path` on port 41324) is dropped, not kept alongside. The apps handle the move from it to MMP; that transition is outside this spec.
-- **Read-only:** clients never write anything to the server or its folders. Every index and item route is a GET; the only POSTs are the pairing routes (protocol 1.1), which record a device in the server's own settings (§4). Watch progress, play counts, favourites and every other kind of per-user state stay on the client device, as they do today.
+- **Read-only:** clients never write anything to the server or its folders. Every index and item route is a GET; the only POSTs are the pairing routes, which record a device in the server's own settings (§4). Watch progress, play counts, favourites and every other kind of per-user state stay on the client device, as they do today.
 
 ## 1. Why this exists: the advantage over Jellyfin, Navidrome and Plex
 
@@ -15,7 +15,7 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
 **Real advantages**
 
 1. **No administration.**
-   - **MMP:** a desktop app with a folder picker, and every device sees everything in the chosen folders (§4). The server appears on the TV over Bonjour and works with no code, account or password. An optional pairing code comes in protocol 1.1 (§4).
+   - **MMP:** a desktop app with a folder picker, and every device sees everything in the chosen folders (§4). The server appears on the TV over Bonjour and works with no code, account or password. An optional pairing code can be turned on (§4).
    - **Jellyfin:** its setup wizard creates an admin account and libraries in a web dashboard.
    - **Plex:** needs a plex.tv account.
    - **Navidrome:** runs as a service and is configured by hand.
@@ -50,9 +50,9 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
 3. **Read-only.**
    - **No client writes:** no route uploads, edits, renames or deletes anything, or stores client data. Play counts, ratings, resume positions, track choices and Fix Match stay in each app's own on-device store.
    - **Nothing written into library folders:** the server writes only its own index, caches and settings, in its app-data directory. No tag edits, sidecars, thumbnails or hidden files next to the media.
-   - **The one exception, when pairing is on (1.1):** pairing (§4) records a paired device in the server's own settings. That's the server's configuration, not the shared folders.
+   - **The one exception, when pairing is on:** pairing (§4) records a paired device in the server's own settings. That's the server's configuration, not the shared folders.
 4. **Never lose data on a bad read.** A scan that fails or a drive that's missing must never look like deleted files to a client (§5).
-5. **One major version per path, additive changes within it.** Optional parts are listed in `features`. Clients ignore unknown fields and unknown enum values.
+5. **One major version per path, additive changes within it.** Optional parts are listed in `features`. Clients ignore unknown fields and unknown enum values. The rules are in §3, versioning.
 6. **Direct play only.** The server sends original bytes with Range support. Decoding is the client's job (AVFoundation in MiniMoon, VLCKit in Matinee).
 
 ## 3. Transport, discovery, versioning
@@ -70,19 +70,36 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
 - **Client identification:** requests to the JSON routes (`/v1/server`, `/v1/index`, `/v1/events`, pairing) carry `MMP-Client: <app>/<version> (<platform>)`, e.g. `matinee/1.3 (tvOS 26.1)`. Media routes (`content`, `art`, `lyrics` and signed URLs) don't require it, because players like VLCKit and AVPlayer open those URLs themselves and won't send it.
 - **Too-old clients:** the server may answer `400` with `error.code = "client_too_old"` for a client version known to be broken. (Not `426`: RFC 9110 §15.5.22 requires an `Upgrade` header naming a protocol to switch to, which doesn't fit "update your app".)
 - **Errors:** always `{"error": {"code": "<stable_snake_case>", "message": "<English, for logs>"}}` with a suitable HTTP status. Clients localize from `code`. v1 codes:
-  - `not_paired`, `token_revoked`, `url_expired` (pairing, 1.1)
-  - `pairing_expired`, `pairing_code_wrong`, `pairing_locked` (1.1)
+  - `not_paired`, `token_revoked`, `url_expired` (pairing)
+  - `pairing_expired`, `pairing_code_wrong`, `pairing_locked` (pairing)
   - `not_found`, `range_not_satisfiable`, `method_not_allowed`
   - `folder_unavailable`
   - `client_too_old`, `unsupported_feature`
 
-## 4. Access: open by default, optional pairing code (1.1)
+### Versioning
+
+`/vN/server` reports the protocol spoken on the `/vN` paths as `protocol: {major, minor, features}`; `software` names the server build and is only for display and logs. Bonjour's `pv` lists every major the server serves.
+
+- **Breaking changes take a new major,** served under new paths (`/v2/…`) beside the old ones for as long as clients that need them are in use. Breaking means a client written for the old version could misread or fail: a route, field or error code removed or renamed, a field's type or meaning changed, a required request header or parameter added, or an index entry a client must now understand to stay correct.
+- **Additive changes raise the minor:** a new route, an optional field, a new error code a client can treat as a generic failure, a new `features` entry. A server never lowers its minor.
+- **`features`** names optional parts a server of the same minor may or may not offer (`art-resize`, `events`). A client checks for a feature before using it rather than inferring it from the minor.
+- **Clients declare the lowest minor they need** for the major they speak, and check `/vN/server` before anything else:
+  - a lower minor means the server needs updating;
+  - a server that doesn't serve the client's major (no `/vN/server`, or `pv` without it) means the client needs updating, or, where `pv` lists only older majors, the server does;
+  - each says which side needs updating, never just that the connection failed.
+- **The server may refuse a known-broken client** with `client_too_old` (above), which the client shows as "update the app".
+
+**History.**
+
+- **1.0** (2026-11-15): the first version. Everything in this document. No version of the protocol shipped before it: during development the server reported 1.0 and then 1.1 (when pairing was added) and changed v1 in place, including dropping slices, so development builds that report 1.1 predate 1.0 and aren't compatible with it.
+
+## 4. Access: open by default, optional pairing code
 
 There is one household and no user accounts. Every client that can reach the server sees everything under its shared folders.
 
-**Open (`auth: none`, the default, and the only mode in 1.0).** No token, code or password. Any device on the local network can read the index and the files under the shared folders, exactly as with the Sync server today. Clients skip the pairing screen, and media URLs are plain `/v1/items/{id}/content` URLs that VLCKit and AVPlayer can open directly.
+**Open (`auth: none`, the default).** No token, code or password. Any device on the local network can read the index and the files under the shared folders, exactly as with the Sync server today. Clients skip the pairing screen, and media URLs are plain `/v1/items/{id}/content` URLs that VLCKit and AVPlayer can open directly.
 
-**Pairing (`auth: pairing`, protocol 1.1, a desktop-app setting: "Require a code for new devices").** A code rather than a password: the server shows six digits and the client asks for them once. There's nothing to remember or retype on each device, and still no account.
+**Pairing (`auth: pairing`, a desktop-app setting: "Require a code for new devices").** A code rather than a password: the server shows six digits and the client asks for them once. There's nothing to remember or retype on each device, and still no account.
 
 1. `POST /v1/pair` with `{"clientName": "Living Room", "app": "matinee", "platform": "tvOS"}`.
    - **Response:** `{"pairingId": "...", "expiresIn": 300}`.
@@ -127,7 +144,7 @@ There is one household and no user accounts. Every client that can reach the ser
 
 `GET /v1/index`, or `GET /v1/index?view=files` for the file list (below)
 
-- **Response:** every item in every shared folder, and every folder needed to reach them, in one gzipped JSON response with an `ETag`. Hidden files and symlinks leading out of the shared folders (unless the user opted in) aren't listed (§9), nor are subfolders the user chose to publish without (below).
+- **Response:** every item in every shared folder, and every folder needed to reach them, in one gzipped JSON response with an `ETag`. Hidden files and symbolic links aren't listed (§9).
 
 ```json
 {
@@ -173,10 +190,10 @@ There is one household and no user accounts. Every client that can reach the ser
 - **No deltas, cursors or tombstones.** Removals, moves, folder deletes and files added then removed between syncs all fall out of the client's comparison. The server keeps no change history.
 - **Scans never publish a guess.** A removal reaches clients only when the server has positively seen that a file is gone:
   - **Unavailable shared folders.** When a folder is added, the server records the identity of the volume it lives on (its device ID or volume UUID). Before every scan it checks that the folder exists, is readable, and is still on that volume. An unplugged drive or unmounted network volume usually leaves an empty mount point behind on the startup disk, so the volume check, not emptiness, is what detects it. If the check fails, the folder is marked `available: false`, its last snapshot keeps being served in the index (listed in `offline`), and its files' content, art and lyrics answer `503 folder_unavailable`.
-  - **A scan error publishes nothing.** A scan error means failing to list a folder or to read a file's size and modification date: a permission error, an I/O error, a volume dropping partway through. Failing to read a file's metadata is not a scan error; that file is still listed with its required fields (§8, reading metadata safely). If a scan error happens under a shared folder, the server keeps that folder's previous snapshot whole and retries on the next scan. After repeated failures the desktop app shows which subfolders can't be read and offers to publish without them. That's an explicit choice by the user, never a silent partial publish. (Keeping only the failed subfolders' previous contents is a possible refinement later; v1 keeps the whole folder.)
+  - **What can't be read isn't there.** A folder or file the scan can't list or stat (a permission error, an I/O error) is treated as absent: its files leave the index, and they come back on a later scan once they can be read. The desktop app and the CLI show which paths can't be read. Failing to read a file's metadata is different: that file is still listed with its required fields (§8, reading metadata safely). A volume dropping partway through isn't a read error either; the volume check above catches it and keeps the folder's last snapshot.
   - **A scan that completes is the truth,** including a folder that's really empty: if it completes without errors, its removals are published.
   - **One step.** A completed scan replaces the folder's snapshot in a single database transaction, and the index ETags are computed after it. A client never sees half a scan.
-  - **No previous snapshot.** On the first scan of a newly added folder, or after the server's index has been rebuilt from scratch, the folder is published only once a scan completes without errors. Until then it's listed as unavailable, not partial, and listed in `offline` with no items. That matters after a rebuild, when clients still hold copies the server no longer knows about: the client rule for offline folders (above) keeps them. A rebuild loses only the index; shared folders, their UUIDs and volume identities live in the server's settings (§8), so they survive it.
+  - **No previous snapshot.** On the first scan of a newly added folder, or after the server's index has been rebuilt from scratch, the folder is published only once a scan completes. Until then it's listed as unavailable, not partial, and listed in `offline` with no items. That matters after a rebuild, when clients still hold copies the server no longer knows about: the client rule for offline folders (above) keeps them. A rebuild loses only the index; shared folders, their UUIDs and volume identities live in the server's settings (§8), so they survive it.
 - **Shared folder removed in the desktop app:** it drops out of `/v1/server` and its items drop out of the index, so clients remove them through the normal comparison. Only a shared folder that is still listed but unavailable keeps its items on clients (`offline`, above).
 - **Size (estimated, not measured):** the example audio item below is about 650 bytes of JSON, so 40,000 tracks is roughly 25 MB, a few MB gzipped. A video item is somewhat larger because of its streams, but video libraries hold far fewer files. Parsing and comparing a 100,000-track library on an Apple TV should be measured before relying on it. If it proves too slow, a delta endpoint can be added later as an optional feature, since v1 changes are additive.
 
@@ -347,7 +364,7 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
     - files whose read failed temporarily are retried on later scans, waiting longer after each failure, up to a fixed number of attempts; after that they're treated as unreadable. Recovering from a failed read is never taken as a sign that the file changed;
     - unreadable files are re-read only when their size, mtime or `rev` changes, after a reader upgrade, or on "Reindex everything";
     - a "Reindex everything" command in the desktop app re-reads every file's metadata. It never changes `rev` or makes clients download media again; content changes come only from size, mtime and the watcher.
-  - **Scan safety:** the volume check, scans that publish nothing after a scan error, and one-step publication are as in §5.
+  - **Scan safety:** the volume check, unreadable paths treated as absent, and one-step publication are as in §5.
 - **Tag reading: a copy, not a dependency.**
   - **What's copied.** The server doesn't depend on the apps' `minimoon_tags` crate. It carries a copy of only the reading side: `read_tag` and its helpers, the native-text and sort-tag reading, and embedded-picture reading. The crate's writing and tag-copying code, and its C interface for Swift, stay out.
   - **Why.** The crate is a thin layer over `lofty`, so the copy is small. The server avoids building the apps' static library and its Swift-facing interface, and it doesn't carry write code it must never call (§2, read-only).
@@ -366,27 +383,27 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 
 ## 9. Security in v1, and what's deferred
 
-- **Open in 1.0.** Anyone on the same network can read everything under the shared folders. That's the same exposure as today's Sync server, which has no auth.
+- **Open by default.** Anyone on the same network can read everything under the shared folders. That's the same exposure as today's Sync server, which has no auth.
   - **The real risk is a laptop that moves:** with the server running, a MacBook on hotel or café Wi-Fi advertises itself and serves its shared folders to everyone there.
-  - **1.0 mitigation:** the network name, and the pause control (§8).
-  - **1.1:** the optional pairing code (§4).
+  - **Mitigations:** the network name, the pause control (§8), and the optional pairing code (§4).
   - **Possible later:** remember the network chosen at setup and pause sharing on any other. Reading the Wi-Fi name on recent macOS may need Location permission (from memory, not checked).
 - **No per-device restrictions.** Every client can read everything under the shared folders. Files outside them are never served.
 - **Nothing to damage.** Because no route writes, an unwanted client can read the published files but can't change, delete or add anything, or alter another device's state.
-- **Pairing mode (1.1):** a code shown on the server proves consent; every API call and media URL is authenticated, and revoking a device makes its next request fail and closes its open downloads (§4).
+- **Pairing mode:** a code shown on the server proves consent; every API call and media URL is authenticated, and revoking a device makes its next request fail and closes its open downloads (§4).
 - **Plain HTTP.** Media, and in pairing mode the token, can be sniffed by anyone on the same LAN.
   - **Why plain:** TLS with a self-signed, pinned certificate works in URLSession through its challenge delegate, but it's unverified for VLCKit's HTTP access and for AVPlayer without a resource loader.
   - **Later:** a `tls` feature with the certificate fingerprint pinned at pairing, once VLCKit's behaviour is tested.
-- **Inside shared folders only.** The server never exposes paths outside the shared folders, filters hidden files, rejects path traversal, and never follows symlinks out of the shared folders unless the user opts in. This matters more in open mode. The Sync server's `/file` route skips some of these filters, so it's not a model to copy.
+- **Inside shared folders only.** The server never exposes paths outside the shared folders, filters hidden files and rejects path traversal. This matters more in open mode.
+- **Symbolic links are never followed,** wherever they point. A link in a shared folder, whether made by the user or unpacked from an archive, could otherwise publish anything it points at to everyone on the network. Scans skip links, and serving a file refuses any path with a link in it. On macOS and Linux content is opened one path component at a time with `O_NOFOLLOW`, so a link swapped in after the check can't be followed either; on Windows, and for embedded art and lyrics (read by path by the tag reader), a short window remains for someone who can already write in the shared folder. To share a drive or another folder, the user adds it as a shared folder of its own. The Sync server's `/file` route skips some of these filters, so it's not a model to copy.
 
 ## 10. Smallest first version
 
-**Where the server stands (2026-11-15).** Steps 2–5, 7 and 8 below are built, and so is the server side of protocol 1.1 (pairing, signed URLs, `events`, `art-resize`):
-- **Not done:** step 1, the playback test, needs Matinee and MiniMoon builds that speak MMP. Step 6 belongs to the desktop app (`minimoon-sync`), which still embeds the old server: the server exposes what that UI needs (shared folders, excluded subfolders, pausing, pairing and devices, error counts, "Reindex everything") but nothing calls it yet.
+**Where the server stands (2026-11-15).** Steps 2–5, 7 and 8 below are built, including pairing, signed URLs, `events` and `art-resize`:
+- **Not done:** step 1, the playback test, needs Matinee and MiniMoon builds that speak MMP. Step 6 belongs to the desktop app (`minimoon-sync`), which still embeds the old server: the server exposes what that UI needs (shared folders, subfolders that can't be read, pausing, pairing and devices, error counts, "Reindex everything") but nothing calls it yet.
 - **Tested:** on macOS only. The Windows code paths were type-checked, and the Linux ones through an Android target that shares them; neither was built or run on its own platform.
 - **Additions beyond the steps:** the ctime check on `rev` bumps (§5), and an idle-sleep assertion while content streams (§8).
 
-**Core (protocol 1.0)**
+**Core**
 
 - **Server:**
   1. **A playback test first.** Build a minimal `/content` endpoint with the HTTP contract in §6. Before anything else depends on it, check that VLCKit (Matinee) and AVPlayer/URLSession (MiniMoon) play, seek, and recover from a dropped connection and a changed file, including whether each sends `If-Range` or checks the ETag across range requests.
@@ -395,7 +412,7 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
   4. **The index:**
      - shared folders (UUIDs, paths, names, volume identities), bumped `rev` values and their counter in the server's settings, and a SQLite index of files and metadata, with reader versions and read status;
      - a file-level watcher that bumps `rev` on in-place writes (§5), resuming from its last event id on macOS. The `notify` crate (8.2.2) covers Linux (inotify, with a watch per directory and `IN_Q_OVERFLOW` reported as a rescan) and Windows. Its FSEvents backend always starts from "now" and doesn't expose event ids, so replay after a restart on macOS needs the server's own FSEvents stream, or a patch to `notify` that exposes the starting id;
-     - the scan-safety rules in §5: the volume check, nothing published after a scan error, one-step publication, no partial first publish;
+     - the scan-safety rules in §5: the volume check, unreadable paths treated as absent, one-step publication, no partial first publish;
      - `/v1/index` with weak ETags and `304`, in both views (`full` and `files`), each with its own ETag.
      This is the largest server piece.
   5. `/content` (from step 1), `/art` and `/lyrics`.
@@ -423,7 +440,7 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
   - **macOS and tvOS (no local copy):** an MMP `LibrarySource` mapping items from the full index to `Track` rows, plus fetch-to-cache playback.
 - **Matinee:** an MMP source feeding `LibraryStore` the way a share does, filling `ProbeResult` from each item's `video` facts instead of probing, and matching streams to VLCKit tracks by `trackNumber`. It plays content URLs through VLCKit. Its existing share machinery (record keys, the state-worth-keeping rule, offline state, the title cap) applies.
 
-**Next (protocol 1.1, already designed above; the server side is built)**
+**Next (already designed above; the server side is built)**
 
 - Optional pairing code, tokens and signed URLs bound to device and generation (server setting, client pairing screen, Keychain storage).
 - `events` (SSE).
@@ -433,7 +450,6 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 
 - TLS.
 - Pausing on unrecognised networks.
-- Keeping only failed subfolders' previous contents after a scan error, instead of the whole shared folder.
 - Jellyfin and OpenSubsonic client backends in the apps.
 - Chapters and more video facts (bit depth, bitrate per stream), added to `streams` as optional fields.
 
@@ -470,7 +486,7 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 - **The server build (tests in `tests/`, run on macOS 27 on APFS):**
   - An in-place write that restores the file's mtime is reported by FSEvents as `ItemModified` and bumps `rev`. A write made while the server is stopped is replayed from the stored event id and bumps `rev` after the restart. FSEvents repeated a file's write flag in a later event, which bumped `rev` twice until the ctime check was added.
   - A transfer of a file written mid-transfer (mtime restored) is cut short before its last chunk. Revoking a device closes its open download and its event stream; pausing closes event streams too.
-  - The `rev` counter, ids and `rev` values survive a restart and an index rebuild. A folder on an unmounted volume keeps serving its last snapshot and is listed in `offline`. A scan error publishes nothing until the user excludes the unreadable subfolder.
+  - The `rev` counter, ids and `rev` values survive a restart and an index rebuild. A folder on an unmounted volume keeps serving its last snapshot and is listed in `offline`. A path the server can't read is left out of the index until it can be.
   - The copied tag reader on crates.io `lofty` 0.25.5 read 1,011 sample files (MP3, WAV, M4A, AIFF, FLAC, MPC, APE, Ogg, WavPack, Opus, Speex) identically to the apps' crate on its pinned revision.
   - ID3 `POPM` ratings and unsynced lyrics (ID3 `USLT`, Vorbis `UNSYNCEDLYRICS`) were gaps in the apps' reader, which the copy matched: `lofty` presents `POPM` as `email|stars|counter` text, and maps unsynced lyrics to `ItemKey::UnsyncLyrics`, which the reader didn't look at. The apps' reader now reads both, and the copy (reader version 2) has the same change, checked by the apps' tests for it on MP3, WAV and FLAC files. The 1,011-file comparison above predates that change.
   - A first scan of 29,722 local files (107 videos and Logic Pro's sample library) took about 5 seconds. Its index is 13.4 MB, 1.1 MB gzipped.

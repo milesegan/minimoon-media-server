@@ -75,11 +75,17 @@ fn write_media(root: &Path) {
 }
 
 async fn start() -> Fixture {
+    start_with(true).await
+}
+
+/// `watch: false` leaves the index as the first scan made it, whatever happens on disk after.
+async fn start_with(watch: bool) -> Fixture {
     let media = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
     write_media(media.path());
     let mut library = LibraryOptions::new(data.path());
     library.workers = 2;
+    library.watch = watch;
     let mut options = ServerOptions::new(library);
     options.port = 0;
     options.advertise = false;
@@ -492,6 +498,40 @@ async fn removed_items_are_not_served() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+    }
+    f.server.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_replaced_with_a_link_is_never_served() {
+    // Not watching, so the item is still published when it's requested: the 404 has to come
+    // from refusing the link, not from the item having been dropped.
+    let f = start_with(false).await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(
+        outside.path().join("secret.bin"),
+        b"outside the shared folder",
+    )
+    .unwrap();
+    let id = f.item_id("small.bin").await;
+    // Swapped for a link out of the folder after it was indexed.
+    std::fs::remove_file(f.media.path().join("small.bin")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.bin"),
+        f.media.path().join("small.bin"),
+    )
+    .unwrap();
+    for route in ["content", "art"] {
+        let response = f
+            .client
+            .get(f.url(&format!("/v1/items/{id}/{route}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+        let body = response.bytes().await.unwrap();
+        assert!(!body.windows(7).any(|w| w == b"outside"), "{route}");
     }
     f.server.shutdown().await;
 }

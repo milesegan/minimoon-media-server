@@ -209,7 +209,7 @@ fn removals_are_published_but_an_unmounted_volume_keeps_the_snapshot() {
 
 #[cfg(unix)]
 #[test]
-fn a_scan_error_publishes_nothing() {
+fn an_unreadable_subfolder_is_treated_as_not_there() {
     use std::os::unix::fs::PermissionsExt;
     if unsafe { libc::geteuid() } == 0 {
         return; // root can read anything
@@ -225,28 +225,55 @@ fn a_scan_error_publishes_nothing() {
         fs::Permissions::from_mode(0o000),
     )
     .unwrap();
-    fs::remove_file(media.path().join("Album/cover.jpg")).unwrap();
     library.rescan(None);
-    std::thread::sleep(Duration::from_millis(300));
-    // A failed scan counts as settled, so a caller can report its errors.
-    assert!(library.wait_until_idle(WAIT));
-    let index = index(&library);
-    // Neither the unreadable folder's file nor the real removal is published.
-    assert_eq!(index["items"].as_array().unwrap().len(), 3);
-    let status = &library.shared_folders()[0];
-    assert!(!status.scan_errors.is_empty());
-    assert_eq!(status.scan_errors[0].path, "Locked");
+    let index = eventually(&library, "dropping the unreadable file", |index| {
+        item(index, "Locked/a.flac").is_none()
+    });
+    assert_eq!(index["items"].as_array().unwrap().len(), 2);
+    assert_eq!(library.shared_folders()[0].scan_errors[0].path, "Locked");
 
-    // The user chooses to publish without the unreadable folder.
-    library
-        .set_excluded(status.id, vec![vec!["Locked".into()]])
-        .unwrap();
-    let index = eventually(&library, "publishing without Locked", |index| {
+    // Once it can be read again, its file comes back and the error clears.
+    fs::set_permissions(
+        media.path().join("Locked"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    library.rescan(None);
+    eventually(&library, "the file coming back", |index| {
+        item(index, "Locked/a.flac").is_some()
+    });
+    assert!(library.shared_folders()[0].scan_errors.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_subfolder_never_readable_is_left_out_of_the_first_publish() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let media = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    fs::create_dir_all(media.path().join("Album")).unwrap();
+    fs::write(media.path().join("Album/01.flac"), b"not really flac").unwrap();
+    fs::create_dir(media.path().join("Private")).unwrap();
+    fs::write(media.path().join("Private/a.flac"), b"x").unwrap();
+    fs::set_permissions(
+        media.path().join("Private"),
+        fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let library = Library::start(options(data.path())).unwrap();
+    library.add_shared_folder(media.path(), None).unwrap();
+    let index = eventually(&library, "the readable part", |index| {
         index["items"].as_array().unwrap().len() == 1
     });
     assert!(item(&index, "Album/01.flac").is_some());
+    assert_eq!(index["offline"], serde_json::json!([]));
+    assert_eq!(library.shared_folders()[0].scan_errors[0].path, "Private");
+    // Restored so the temporary folder can be deleted.
     fs::set_permissions(
-        media.path().join("Locked"),
+        media.path().join("Private"),
         fs::Permissions::from_mode(0o755),
     )
     .unwrap();

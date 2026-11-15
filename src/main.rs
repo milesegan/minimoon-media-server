@@ -6,7 +6,6 @@ use minimoon_media_server::library::{
     IndexActivity, LibraryOptions, SharedFolderStatus, NOT_INDEXED_YET,
 };
 use minimoon_media_server::network::preferred_bind_ip;
-use minimoon_media_server::scan::ScanOptions;
 use minimoon_media_server::settings::AuthMode;
 use minimoon_media_server::{MediaServer, ServerOptions};
 use std::collections::HashMap;
@@ -27,10 +26,6 @@ options:
   --name <name>                 display name shown to devices (saved)
   --pairing                     require a pairing code for new devices (saved)
   --open                        let any device on the network connect (saved)
-  --exclude <subfolder>         publish a shared folder without this subfolder, e.g. one
-                                it can't read (saved)
-  --include <subfolder>         undo --exclude (saved)
-  --follow-external-symlinks    follow links that point outside the shared folders
   --no-bonjour                  don't advertise over Bonjour
   --reindex                     re-read every file's metadata
   -v, --verbose                 log requests and scans";
@@ -49,9 +44,6 @@ struct CliOptions {
     bind: Option<std::net::IpAddr>,
     name: Option<String>,
     auth: Option<AuthMode>,
-    exclude: Vec<PathBuf>,
-    include: Vec<PathBuf>,
-    follow_external_symlinks: bool,
     no_bonjour: bool,
     reindex: bool,
     verbose: bool,
@@ -84,9 +76,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
             "--name" => options.name = Some(value("--name")?),
             "--pairing" => options.auth = Some(AuthMode::Pairing),
             "--open" => options.auth = Some(AuthMode::None),
-            "--exclude" => options.exclude.push(PathBuf::from(value("--exclude")?)),
-            "--include" => options.include.push(PathBuf::from(value("--include")?)),
-            "--follow-external-symlinks" => options.follow_external_symlinks = true,
             "--no-bonjour" => options.no_bonjour = true,
             "--reindex" => options.reindex = true,
             "--verbose" | "-v" => options.verbose = true,
@@ -102,63 +91,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
         }
     }
     Ok(options)
-}
-
-/// A subfolder given on the command line, as the shared folder it's in and its path components
-/// relative to that folder.
-fn subfolder_of(
-    folders: &[SharedFolderStatus],
-    subfolder: &std::path::Path,
-) -> Result<(uuid::Uuid, Vec<String>)> {
-    let canonical = subfolder
-        .canonicalize()
-        .with_context(|| format!("can't find {}", subfolder.display()))?;
-    for folder in folders {
-        let Ok(root) = folder.path.canonicalize() else {
-            continue;
-        };
-        if let Ok(relative) = canonical.strip_prefix(&root) {
-            let components: Vec<String> = relative
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            if components.is_empty() {
-                bail!("{} is a shared folder itself", subfolder.display());
-            }
-            return Ok((folder.id, components));
-        }
-    }
-    bail!("{} isn't inside a shared folder", subfolder.display())
-}
-
-/// Applies `--exclude` and `--include` to the saved excluded subfolders.
-fn update_excluded(server: &MediaServer, options: &CliOptions) -> Result<()> {
-    if options.exclude.is_empty() && options.include.is_empty() {
-        return Ok(());
-    }
-    let folders = server.library().shared_folders();
-    let mut excluded: std::collections::HashMap<uuid::Uuid, Vec<Vec<String>>> = folders
-        .iter()
-        .map(|folder| (folder.id, folder.excluded.clone()))
-        .collect();
-    for path in &options.exclude {
-        let (id, components) = subfolder_of(&folders, path)?;
-        let list = excluded.entry(id).or_default();
-        if !list.contains(&components) {
-            list.push(components);
-        }
-    }
-    for path in &options.include {
-        let (id, components) = subfolder_of(&folders, path)?;
-        excluded.entry(id).or_default().retain(|c| *c != components);
-    }
-    for folder in &folders {
-        let list = excluded.remove(&folder.id).unwrap_or_default();
-        if list != folder.excluded {
-            server.library().set_excluded(folder.id, list)?;
-        }
-    }
-    Ok(())
 }
 
 /// The data directory the desktop app and the CLI share by default.
@@ -193,10 +125,7 @@ async fn main() -> Result<()> {
         Some(dir) => dir,
         None => default_data_dir()?,
     };
-    let mut library = LibraryOptions::new(&data_dir);
-    library.scan = ScanOptions {
-        follow_external_symlinks: options.follow_external_symlinks,
-    };
+    let library = LibraryOptions::new(&data_dir);
     let mut server_options = ServerOptions::new(library);
     if let Some(port) = options.port {
         server_options.port = port;
@@ -210,7 +139,6 @@ async fn main() -> Result<()> {
     for folder in &options.folders {
         server.library().add_shared_folder(folder, None)?;
     }
-    update_excluded(&server, &options)?;
     if let Some(name) = options.name.clone() {
         server.set_name(Some(name))?;
     }
@@ -451,13 +379,8 @@ fn summary(folders: &[SharedFolderStatus]) -> Vec<String> {
             continue;
         }
         lines.push(format!(
-            "{} couldn't be read completely, so {}:",
-            folder.name,
-            if folder.files > 0 {
-                "its previously published files are kept"
-            } else {
-                "it isn't shared yet"
-            }
+            "Parts of {} couldn't be read, so they aren't shared:",
+            folder.name
         ));
         for error in &folder.scan_errors {
             lines.push(format!(
@@ -467,8 +390,7 @@ fn summary(folders: &[SharedFolderStatus]) -> Vec<String> {
             ));
         }
         lines.push(
-            "  Fix the permissions, or share it without a subfolder by running again \
-             with --exclude <subfolder>."
+            "  They're shared once they can be read, for example after fixing their permissions."
                 .into(),
         );
     }
@@ -558,14 +480,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_exclusions() {
-        let options = parse_args(args(&["--exclude", "a/b", "--include", "c"])).unwrap();
-        assert_eq!(options.exclude, vec![PathBuf::from("a/b")]);
-        assert_eq!(options.include, vec![PathBuf::from("c")]);
-        assert!(parse_args(args(&["--exclude"])).is_err());
-    }
-
-    #[test]
     fn rejects_bad_input() {
         assert!(parse_args(args(&["--unknown"])).is_err());
         assert!(parse_args(args(&["--port"])).is_err());
@@ -587,7 +501,6 @@ mod tests {
             outdated_total: 0,
             scan_errors: Vec::new(),
             failed_scans: 0,
-            excluded: Vec::new(),
             files: 0,
             temporary_failures: 0,
             unreadable: 0,

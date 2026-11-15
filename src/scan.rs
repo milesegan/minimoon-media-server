@@ -26,8 +26,8 @@ pub struct ScannedFile {
 pub struct ScanResult {
     /// Every file, sorted by path.
     pub files: Vec<ScannedFile>,
-    /// Folders or files that couldn't be listed or stat-ed. Any error means the scan publishes
-    /// nothing.
+    /// Folders or files that couldn't be listed or stat-ed, so treated as not there. Kept only
+    /// to report.
     pub errors: Vec<ScanError>,
     /// Names skipped because they aren't valid UTF-8.
     pub skipped_non_utf8: Vec<PathBuf>,
@@ -39,13 +39,6 @@ pub struct ScanError {
     /// Relative to the shared folder, `/`-separated; empty for the folder itself.
     pub path: String,
     pub message: String,
-}
-
-/// How a scan treats symbolic links.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ScanOptions {
-    /// Follow links that point outside the shared folder. Links inside it are always followed.
-    pub follow_external_symlinks: bool,
 }
 
 /// Whether a file or folder name is hidden from clients: dot files, and the metadata files
@@ -114,40 +107,21 @@ pub fn ns_to_ms(ns: i64) -> i64 {
     ns.div_euclid(1_000_000)
 }
 
-/// Walks a shared folder. `excluded` subfolders (path components) are skipped entirely.
-pub fn scan(root: &Path, options: ScanOptions, excluded: &[Vec<String>]) -> ScanResult {
+/// Walks a shared folder. Symbolic links are never followed, wherever they point (spec §9): a
+/// link is skipped like a hidden file, so nothing outside the folder can be published through
+/// one. To share a drive or another folder, the user adds it as a shared folder of its own.
+pub fn scan(root: &Path) -> ScanResult {
     let mut result = ScanResult::default();
-    let canonical_root = match root.canonicalize() {
-        Ok(path) => path,
-        Err(error) => {
-            result.errors.push(ScanError {
-                path: String::new(),
-                message: error.to_string(),
-            });
-            return result;
-        }
-    };
-    let excluded: HashSet<String> = excluded.iter().map(|path| path.join("/")).collect();
     let mut visited = HashSet::new();
-    if let Some(key) = dir_key(&canonical_root) {
+    if let Some(key) = dir_key(root) {
         visited.insert(key);
     }
     let mut walker = Walker {
-        canonical_root: &canonical_root,
-        options,
-        excluded: &excluded,
         visited,
-        deferred: Vec::new(),
         result: &mut result,
     };
     walker.walk(root, "");
-    // Linked folders are walked after every real one, so a link never claims a folder that's
-    // also reachable directly, whatever order the folders are listed in.
-    while let Some((dir, relative)) = walker.deferred.pop() {
-        walker.walk_linked(&dir, &relative);
-    }
     result.files.sort_by(|a, b| a.path.cmp(&b.path));
-    result.files.dedup_by(|a, b| a.path == b.path);
     result
 }
 
@@ -164,15 +138,12 @@ fn dir_key(path: &Path) -> Option<PathBuf> {
 }
 
 struct Walker<'a> {
-    canonical_root: &'a Path,
-    options: ScanOptions,
-    excluded: &'a HashSet<String>,
+    /// Folders already walked. Without links a folder can still be reached twice through a
+    /// bind mount or a hard-linked folder; this keeps such a loop from recursing forever.
     #[cfg(unix)]
     visited: HashSet<(u64, u64)>,
     #[cfg(not(unix))]
     visited: HashSet<PathBuf>,
-    /// Linked folders to walk once the real ones are done.
-    deferred: Vec<(PathBuf, String)>,
     result: &'a mut ScanResult,
 }
 
@@ -215,11 +186,8 @@ impl Walker<'_> {
             } else {
                 format!("{relative}/{name}")
             };
-            if self.excluded.contains(&child_relative) {
-                continue;
-            }
             let path = entry.path();
-            let link_metadata = match std::fs::symlink_metadata(&path) {
+            let metadata = match std::fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
@@ -227,27 +195,19 @@ impl Walker<'_> {
                     continue;
                 }
             };
-            let is_link = link_metadata.file_type().is_symlink();
-            let metadata = if is_link {
-                match self.follow(&path, &child_relative) {
-                    Some(metadata) => metadata,
-                    None => continue,
-                }
-            } else {
-                link_metadata
-            };
+            if metadata.file_type().is_symlink() {
+                tracing::debug!("not following the link {path:?}: links are never followed");
+                continue;
+            }
             if has_hidden_attribute(&metadata) {
                 continue;
             }
-            if metadata.is_dir() && is_link {
-                self.deferred.push((path, child_relative));
-            } else if metadata.is_dir() {
+            if metadata.is_dir() {
                 let Some(key) = dir_key(&path) else {
                     self.error(&child_relative, "can't identify folder");
                     continue;
                 };
                 if !self.visited.insert(key) {
-                    // A link back into a folder already walked: skip the loop.
                     continue;
                 }
                 self.walk(&path, &child_relative);
@@ -265,93 +225,111 @@ impl Walker<'_> {
             }
         }
     }
-
-    /// Walks a linked folder unless its target was already walked.
-    fn walk_linked(&mut self, dir: &Path, relative: &str) {
-        let Some(key) = dir_key(dir) else {
-            self.error(relative, "can't open the linked folder");
-            return;
-        };
-        if self.visited.insert(key) {
-            self.walk(dir, relative);
-        }
-    }
-
-    /// The metadata of a link's target, when the link may be followed.
-    ///
-    /// A link whose target can't be reached is a scan error, not a skipped entry: a link into a
-    /// drive that's been unplugged must not make its files look deleted. Only a link that's
-    /// plainly dangling (its target's folder exists but the target doesn't) is skipped.
-    fn follow(&mut self, link: &Path, relative: &str) -> Option<std::fs::Metadata> {
-        let target = match link.canonicalize() {
-            Ok(target) => target,
-            Err(error) => {
-                if !is_dangling(link, &error) {
-                    self.error(relative, format!("can't follow the link: {error}"));
-                }
-                return None;
-            }
-        };
-        if !target.starts_with(self.canonical_root) && !self.options.follow_external_symlinks {
-            tracing::debug!("not following {link:?}: it points outside the shared folder");
-            return None;
-        }
-        match std::fs::metadata(&target) {
-            Ok(metadata) => Some(metadata),
-            Err(error) => {
-                self.error(relative, format!("can't follow the link: {error}"));
-                None
-            }
-        }
-    }
 }
 
-/// Whether a link that failed to resolve is dangling: its target is missing but the folder its
-/// target would be in exists. A missing folder may be an unmounted volume, so that isn't
-/// dangling.
-fn is_dangling(link: &Path, error: &std::io::Error) -> bool {
-    if error.kind() != std::io::ErrorKind::NotFound {
-        return false;
-    }
-    let Ok(target) = std::fs::read_link(link) else {
-        return false;
-    };
-    let target = if target.is_absolute() {
-        target
-    } else {
-        link.parent().map(|dir| dir.join(&target)).unwrap_or(target)
-    };
-    target.parent().is_some_and(|dir| dir.is_dir())
-}
-
-/// Resolves an index path inside a shared folder to a file on disk, refusing anything that
-/// leaves the folder (spec §9). Returns `None` for paths that don't resolve to a file.
-pub fn resolve(root: &Path, relative: &str, options: ScanOptions) -> Option<PathBuf> {
+/// Checks an index path's components: no empty, `.`, `..` or hidden part (spec §9).
+fn valid_components(relative: &str) -> Option<std::str::Split<'_, char>> {
     if relative.is_empty() {
         return None;
     }
-    let mut path = root.to_path_buf();
     for component in relative.split('/') {
         if component.is_empty()
             || component == "."
             || component == ".."
             || is_hidden_name(component)
+            || (cfg!(windows) && component.contains('\\'))
         {
             return None;
         }
-        if component.contains('\\') && cfg!(windows) {
-            return None;
-        }
+    }
+    Some(relative.split('/'))
+}
+
+/// Resolves an index path inside a shared folder to a file on disk, refusing traversal, hidden
+/// names, and any part that's a symbolic link (spec §9). Returns `None` for paths that don't
+/// resolve to a regular file. Content is opened with [`open_inside`], which also refuses links
+/// at the moment it opens, so a link swapped in after this check isn't followed (on Unix).
+pub fn resolve(root: &Path, relative: &str) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for component in valid_components(relative)? {
         path.push(component);
-    }
-    let canonical = path.canonicalize().ok()?;
-    if !options.follow_external_symlinks {
-        let canonical_root = root.canonicalize().ok()?;
-        if !canonical.starts_with(&canonical_root) {
+        if std::fs::symlink_metadata(&path)
+            .ok()?
+            .file_type()
+            .is_symlink()
+        {
             return None;
         }
     }
-    canonical.is_file().then_some(path)
+    std::fs::symlink_metadata(&path)
+        .ok()?
+        .is_file()
+        .then_some(path)
+}
+
+/// Opens a file inside a shared folder without following a symbolic link anywhere below the
+/// folder. On Unix each part is opened relative to the last with `O_NOFOLLOW`, so the check and
+/// the open are one step and a link swapped in meanwhile makes the open fail. Elsewhere it's
+/// [`resolve`] followed by an open, which leaves a short window for someone who can write in
+/// the folder.
+#[cfg(unix)]
+pub fn open_inside(root: &Path, relative: &str) -> std::io::Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
+    let c_string = |bytes: &[u8]| CString::new(bytes).map_err(|_| not_found());
+    let components: Vec<&str> = valid_components(relative).ok_or_else(not_found)?.collect();
+    let root = c_string(root.as_os_str().as_bytes())?;
+    // SAFETY: a valid C string; the descriptor is owned immediately below.
+    let fd = unsafe {
+        libc::open(
+            root.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fd is a freshly opened descriptor that nothing else owns.
+    let mut dir = unsafe { OwnedFd::from_raw_fd(fd) };
+    for (n, component) in components.iter().enumerate() {
+        let last = n + 1 == components.len();
+        let name = c_string(component.as_bytes())?;
+        // O_NONBLOCK so a FIFO in the folder can't stall the open; it doesn't affect reading a
+        // regular file, and anything else is refused below.
+        let flags = libc::O_RDONLY
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | if last {
+                libc::O_NONBLOCK
+            } else {
+                libc::O_DIRECTORY
+            };
+        // SAFETY: dir is an open directory and name a valid C string.
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: as above.
+        let opened = unsafe { OwnedFd::from_raw_fd(fd) };
+        if last {
+            let file = std::fs::File::from(opened);
+            if !file.metadata()?.is_file() {
+                return Err(not_found());
+            }
+            return Ok(file);
+        }
+        dir = opened;
+    }
+    Err(not_found())
+}
+
+#[cfg(not(unix))]
+pub fn open_inside(root: &Path, relative: &str) -> std::io::Result<std::fs::File> {
+    let path = resolve(root, relative).ok_or(std::io::ErrorKind::NotFound)?;
+    std::fs::File::open(path)
 }
 
 #[cfg(test)]
@@ -369,71 +347,60 @@ mod tests {
         fs::write(root.join(".DS_Store"), b"x").unwrap();
         fs::write(root.join("desktop.ini"), b"x").unwrap();
         fs::write(root.join("b/.hidden/x.flac"), b"x").unwrap();
-        let result = scan(root, ScanOptions::default(), &[]);
+        let result = scan(root);
         assert!(result.errors.is_empty());
         let paths: Vec<_> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["a.flac", "b/2.flac"]);
         assert_eq!(result.files[1].size, 2);
     }
 
-    #[test]
-    fn skips_excluded_folders() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("a/b")).unwrap();
-        fs::write(dir.path().join("a/b/x.flac"), b"x").unwrap();
-        fs::write(dir.path().join("a/y.flac"), b"y").unwrap();
-        let result = scan(
-            dir.path(),
-            ScanOptions::default(),
-            &[vec!["a".into(), "b".into()]],
-        );
-        let paths: Vec<_> = result.files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, vec!["a/y.flac"]);
-    }
-
     #[cfg(unix)]
     #[test]
-    fn follows_internal_links_but_not_external_ones() {
+    fn never_follows_links_inside_or_outside_the_folder() {
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("secret.flac"), b"s").unwrap();
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("real")).unwrap();
         fs::write(dir.path().join("real/x.flac"), b"x").unwrap();
         std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("alias")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real/x.flac"), dir.path().join("y.flac"))
+            .unwrap();
         std::os::unix::fs::symlink(outside.path(), dir.path().join("out")).unwrap();
-        // A loop back to the root is skipped.
-        std::os::unix::fs::symlink(dir.path(), dir.path().join("real/loop")).unwrap();
-        let result = scan(dir.path(), ScanOptions::default(), &[]);
+        // A link into a drive that isn't mounted is skipped too, not a scan error: nothing
+        // behind a link is ever published, so nothing behind one can look deleted.
+        std::os::unix::fs::symlink("/Volumes/Not Mounted/Jazz", dir.path().join("Jazz")).unwrap();
+        let result = scan(dir.path());
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
         let paths: Vec<_> = result.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["real/x.flac"]);
-        assert!(resolve(dir.path(), "out/secret.flac", ScanOptions::default()).is_none());
-        let external = ScanOptions {
-            follow_external_symlinks: true,
-        };
-        let result = scan(dir.path(), external, &[]);
-        assert!(result.files.iter().any(|f| f.path == "out/secret.flac"));
-        assert!(resolve(dir.path(), "out/secret.flac", external).is_some());
+        for path in ["out/secret.flac", "alias/x.flac", "y.flac"] {
+            assert!(resolve(dir.path(), path).is_none(), "{path}");
+            assert!(open_inside(dir.path(), path).is_err(), "{path}");
+        }
+        assert!(resolve(dir.path(), "real/x.flac").is_some());
+        let mut contents = String::new();
+        std::io::Read::read_to_string(
+            &mut open_inside(dir.path(), "real/x.flac").unwrap(),
+            &mut contents,
+        )
+        .unwrap();
+        assert_eq!(contents, "x");
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_link_into_a_missing_volume_is_a_scan_error_but_a_dangling_one_is_skipped() {
+    fn open_inside_refuses_a_link_swapped_in_after_resolving() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir(outside.path().join("real")).unwrap();
+        fs::write(outside.path().join("real/x.flac"), b"secret").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("x.flac"), b"x").unwrap();
-        std::os::unix::fs::symlink("/Volumes/Not Mounted/Jazz", dir.path().join("Jazz")).unwrap();
-        let external = ScanOptions {
-            follow_external_symlinks: true,
-        };
-        let result = scan(dir.path(), external, &[]);
-        assert_eq!(result.errors.len(), 1);
-        assert_eq!(result.errors[0].path, "Jazz");
-
-        fs::remove_file(dir.path().join("Jazz")).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("deleted.flac"), dir.path().join("old.flac"))
-            .unwrap();
-        let result = scan(dir.path(), external, &[]);
-        assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(result.files.len(), 1);
+        fs::create_dir(dir.path().join("real")).unwrap();
+        fs::write(dir.path().join("real/x.flac"), b"x").unwrap();
+        assert!(resolve(dir.path(), "real/x.flac").is_some());
+        // Between the check and the open, the folder is replaced with a link out of it.
+        fs::remove_dir_all(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("real"), dir.path().join("real")).unwrap();
+        assert!(open_inside(dir.path(), "real/x.flac").is_err());
     }
 
     #[test]
@@ -441,10 +408,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.flac"), b"x").unwrap();
         fs::write(dir.path().join(".h.flac"), b"x").unwrap();
-        let options = ScanOptions::default();
-        assert!(resolve(dir.path(), "a.flac", options).is_some());
-        assert!(resolve(dir.path(), "../a.flac", options).is_none());
-        assert!(resolve(dir.path(), ".h.flac", options).is_none());
-        assert!(resolve(dir.path(), "", options).is_none());
+        assert!(resolve(dir.path(), "a.flac").is_some());
+        assert!(open_inside(dir.path(), "a.flac").is_ok());
+        for path in ["../a.flac", ".h.flac", "", "a.flac/", "./a.flac"] {
+            assert!(resolve(dir.path(), path).is_none(), "{path:?}");
+            assert!(open_inside(dir.path(), path).is_err(), "{path:?}");
+        }
     }
 }

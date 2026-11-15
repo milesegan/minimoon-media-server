@@ -75,7 +75,7 @@ pub struct ServedItem {
     pub rev: u64,
 }
 
-/// What the pairing routes check (protocol 1.1).
+/// What the pairing routes check.
 #[derive(Clone, Debug, Default)]
 pub struct AuthState {
     pub mode: AuthMode,
@@ -418,7 +418,6 @@ mod tests {
             path: PathBuf::from("/music"),
             name: name.into(),
             volume: VolumeIdentity::default(),
-            excluded: Vec::new(),
         }
     }
 

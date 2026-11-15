@@ -22,7 +22,7 @@ pub enum AuthMode {
     /// Open: any device on the network can read the shared folders.
     #[default]
     None,
-    /// New devices need a six-digit code shown on the server (protocol 1.1).
+    /// New devices need a six-digit code shown on the server.
     Pairing,
 }
 
@@ -48,10 +48,6 @@ pub struct SharedFolderSettings {
     pub name: String,
     /// The volume the folder lived on when it was added.
     pub volume: VolumeIdentity,
-    /// Subfolders the user chose to publish without after they couldn't be read (spec §5,
-    /// "A scan error publishes nothing"). Each is a list of path components.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub excluded: Vec<Vec<String>>,
 }
 
 /// Bumped content revisions (spec §5, `rev`).
@@ -65,7 +61,7 @@ pub struct RevSettings {
     pub files: BTreeMap<Uuid, BTreeMap<String, u64>>,
 }
 
-/// A device paired with the server (protocol 1.1).
+/// A device paired with the server.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairedDevice {
@@ -84,7 +80,7 @@ pub struct PairedDevice {
     pub revoked: bool,
 }
 
-/// Pairing state (protocol 1.1).
+/// Pairing state.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairingSettings {
@@ -321,7 +317,6 @@ mod tests {
                 path: PathBuf::from("/x"),
                 name: name.into(),
                 volume: VolumeIdentity::default(),
-                excluded: Vec::new(),
             });
         }
         assert_eq!(settings.unique_folder_name("Music"), "Music 3");
