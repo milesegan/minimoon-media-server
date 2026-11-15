@@ -3,10 +3,12 @@
   "productName": "MiniMoon Media Server",
   "identifier": "com.plastaq.minimoon-media-server",
   "build": {
-    "frontendDist": "ui"
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
     "windows": [
       {
         "title": "MiniMoon Media Server",

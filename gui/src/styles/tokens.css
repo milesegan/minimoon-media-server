@@ -1,0 +1,92 @@
+/* Colours and other design tokens, light and dark. Everything else refers to these. */
+
+:root {
+  --bg: #f4f4f7;
+  --card: #ffffff;
+  --text: #1c1c22;
+  --muted: #62626b;
+  --border: #e4e4ea;
+  --divider: #ececf1;
+  --control-border: #d1d1d8;
+  --field: #ffffff;
+  --hover: rgba(28, 28, 34, 0.06);
+  --pressed: rgba(28, 28, 34, 0.1);
+
+  /* Indigo: text and icons, then fills (switches, bars), then the quiet tint behind icons. */
+  --accent: #3a3f9e;
+  --accent-fill: #3a3f9e;
+  --accent-tint: #ecedf8;
+  --primary-bg: #3a3f9e;
+  --primary-text: #ffffff;
+
+  --amber: #8a5a00;
+  --amber-bg: #fdf4e3;
+  --amber-border: #f0dcb0;
+  --error: #a1211a;
+  --error-bg: #fdebe9;
+  --error-border: #f5c9c4;
+
+  --track: #e6e6ec;
+  --chip-bg: #f0f0f4;
+  --chip-text: #4a4a55;
+  --offline-text: #4a4a55;
+
+  /* The icon's navy and cream. */
+  --band: #1f2259;
+  --band-text: #ffffff;
+  --band-state: #c9cbea;
+  --band-label: #b9bce0;
+  --band-rule: rgba(255, 255, 255, 0.14);
+  --cream: #f1e3a3;
+  --code-text: #1f2259;
+  --live: #5fd083;
+  --idle: #f0b13c;
+  --down: #ff8a80;
+
+  --shadow: 0 1px 2px rgba(20, 20, 40, 0.04);
+  --toast-bg: #1c1c22;
+  --toast-text: #ffffff;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17171c;
+    --card: #222228;
+    --text: #f2f2f7;
+    --muted: #a3a3ad;
+    --border: #34343c;
+    --divider: #2e2e36;
+    --control-border: #44444c;
+    --field: #1b1b20;
+    --hover: rgba(242, 242, 247, 0.07);
+    --pressed: rgba(242, 242, 247, 0.12);
+
+    --accent: #b5baff;
+    --accent-fill: #6c73e0;
+    --accent-tint: #2f3160;
+    --primary-bg: #5960d4;
+    --primary-text: #ffffff;
+
+    --amber: #f0b13c;
+    --amber-bg: #2e2617;
+    --amber-border: #54431f;
+    --error: #ff9b92;
+    --error-bg: #3a1f21;
+    --error-border: #5e2b2c;
+
+    --track: #34343c;
+    --chip-bg: #2e2e36;
+    --chip-text: #c4c4cc;
+    --offline-text: #c4c4cc;
+
+    --band: #272b6e;
+    --band-state: #d0d2f0;
+    --band-label: #c3c6ea;
+    --code-text: #e4e6ff;
+
+    --shadow: none;
+    --toast-bg: #f2f2f7;
+    --toast-text: #17171c;
+  }
+}

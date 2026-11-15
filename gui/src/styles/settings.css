@@ -1,0 +1,46 @@
+/* Setting rows: a title and hint on the left, a control on the right. */
+
+.setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0;
+  padding: 10px 14px;
+}
+
+.setting + .setting {
+  border-top: 1px solid var(--divider);
+}
+
+.setting.wrap {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding-block: 9px;
+}
+
+.setting.wrap .setting-title {
+  flex: 1 1 160px;
+}
+
+.setting-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.setting-title {
+  display: block;
+  font-weight: 550;
+}
+
+.setting input[type="text"] {
+  flex: 0 1 260px;
+  min-width: 160px;
+}
+
+.hint {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: normal;
+}

@@ -1,0 +1,93 @@
+/* The card for an incoming pairing request: who, the code in digit tiles, the countdown. */
+
+.pairing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 18px;
+  margin-top: 10px;
+  padding: 14px 10px 14px 18px;
+  border: 1.5px solid var(--accent-fill);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent-fill) 14%, transparent);
+}
+
+.pairing .who {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.pairing .title {
+  display: block;
+  font-size: 15px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.pairing .instruction {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pairing .time {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pairing .time .track {
+  flex: 0 1 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.pairing .time .bar {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent-fill);
+  transform-origin: left;
+  transition: transform 1s linear;
+}
+
+.pairing .code-and-close {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.pairing .code {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--code-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 24px;
+  font-weight: 600;
+  -webkit-user-select: all;
+  user-select: all;
+  cursor: text;
+}
+
+.pairing .digit {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 42px;
+  border-radius: 7px;
+  background: var(--accent-tint);
+}
+
+/* The code reads as two groups of three. */
+.pairing .digit.after-gap {
+  margin-left: 6px;
+}

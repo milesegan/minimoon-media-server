@@ -9,7 +9,9 @@ use anyhow::{bail, Context, Result};
 use minimoon_media_server::library::NOT_INDEXED_YET;
 use minimoon_media_server::library::{IndexActivity, LibraryOptions, SharedFolderStatus};
 use minimoon_media_server::network::preferred_bind_ip;
-use minimoon_media_server::settings::{default_data_dir, AuthMode, PairedDevice};
+use minimoon_media_server::settings::{
+    default_data_dir, default_server_name, AuthMode, PairedDevice,
+};
 use minimoon_media_server::{MediaServer, ServerOptions};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -93,6 +95,8 @@ struct ServerView {
     name: String,
     /// The saved name, or `None` for the host name.
     custom_name: Option<String>,
+    /// This computer's own name, which devices see when there's no saved name.
+    host_name: String,
     pairing: bool,
     keep_awake: bool,
     paused: bool,
@@ -239,6 +243,7 @@ async fn status(app: State<'_, App>) -> Result<Status, String> {
         Ok(ServerView {
             name: settings.display_name(),
             custom_name: settings.name.clone(),
+            host_name: default_server_name(),
             pairing: settings.auth == AuthMode::Pairing,
             keep_awake: settings.keep_awake,
             paused,

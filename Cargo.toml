@@ -10,7 +10,7 @@ keywords = ["media", "music", "video", "lan", "server"]
 categories = ["command-line-utilities", "web-programming::http-server"]
 
 [workspace]
-members = [".", "gui"]
+members = [".", "gui/src-tauri"]
 # The GUI needs a system webview to build; plain `cargo build`/`test` at the root skip it.
 default-members = ["."]
 

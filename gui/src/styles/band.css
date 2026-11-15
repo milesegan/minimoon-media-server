@@ -1,0 +1,198 @@
+/* The navy header band: the moon, name, sharing state, pause button and the three figures. */
+
+.band {
+  padding: 16px 20px 14px;
+  border-radius: 14px;
+  background: var(--band);
+  color: var(--band-text);
+}
+
+.band :focus-visible {
+  outline-color: rgba(255, 255, 255, 0.85);
+}
+
+.band-top {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.moon {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  fill: var(--cream);
+}
+
+.identity {
+  flex: 1;
+  min-width: 0;
+}
+
+h1 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 1px;
+  color: var(--band-state);
+}
+
+.state .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--band-label);
+}
+
+.state.sharing .dot {
+  background: var(--live);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 22%, transparent);
+}
+
+.state.paused .dot {
+  background: var(--idle);
+}
+
+.state.failed .dot {
+  background: var(--down);
+}
+
+.state.starting .dot {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+button.band-button {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+  color: #ffffff;
+  font-weight: 550;
+}
+
+button.band-button:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.18);
+}
+
+button.band-button:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+/* Paused: resuming is the one thing to do. */
+button.band-button.resume {
+  border-color: var(--cream);
+  background: var(--cream);
+  color: #1f2259;
+}
+
+button.band-button.resume:hover:not(:disabled) {
+  border-color: #f6ecbf;
+  background: #f6ecbf;
+}
+
+button.band-button.resume:active:not(:disabled) {
+  background: #e6d690;
+}
+
+.figures {
+  display: grid;
+  /* The address is the longest figure and the one people read out; it gets the most room. */
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin: 12px 0 0;
+  padding-top: 11px;
+  border-top: 1px solid var(--band-rule);
+}
+
+.figure {
+  min-width: 0;
+}
+
+.figure dt {
+  color: var(--band-label);
+  font-size: 12px;
+}
+
+.figure dd {
+  margin: 2px 0 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The copy button's hover and focus ring reach past the text; its text trims itself instead. */
+.figure dd.address-figure {
+  overflow: visible;
+}
+
+.figure dd.none,
+.figure-none {
+  color: var(--band-label);
+  font-weight: 500;
+}
+
+button.address {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: -2px -5px;
+  padding: 2px 5px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+}
+
+button.address:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+button.address:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.address-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+button.address svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: var(--band-label);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

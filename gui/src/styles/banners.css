@@ -1,0 +1,46 @@
+/* The failure and paused banners under the band. */
+
+.banner {
+  margin-top: 10px;
+  padding: 11px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.banner > span {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+}
+
+.banner strong {
+  font-weight: 650;
+}
+
+.banner.failure {
+  border-color: var(--error-border);
+  background: var(--error-bg);
+}
+
+.banner.failure strong {
+  color: var(--error);
+}
+
+.banner.failure > span {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.banner.paused {
+  border-color: var(--amber-border);
+  background: var(--amber-bg);
+}
+
+.banner.paused strong {
+  color: var(--amber);
+}
+
+.banner.paused > span {
+  color: var(--text);
+}

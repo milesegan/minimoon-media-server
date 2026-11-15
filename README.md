@@ -59,14 +59,28 @@ drive or another folder, add it as a shared folder of its own.
 shared folders (add, rename, remove, rescan, open in the file manager), reindexing, the display name, open or pairing
 access, keep-awake, pairing codes as they arrive, and paired devices with revocation.
 
+It follows the layout of Tauri's `create-tauri-app` React + TypeScript template: the frontend is
+a Vite project in `gui/` (`index.html`, `src/`), and the Rust side is in `gui/src-tauri/`. Building
+it needs Node and [pnpm](https://pnpm.io):
+
 ```sh
-cargo run -p minimoon-media-server-gui
+cd gui
+pnpm install
+pnpm tauri dev
 ```
 
-It uses the same data directory as the CLI by default, so don't run both at once. It accepts
-`--data-dir <dir>` and `--port <port>` like the CLI. The frontend is plain HTML, CSS and
-JavaScript in `gui/ui/`, with no Node build step. To make an app bundle, install the Tauri CLI
-(`cargo install tauri-cli --version '^2'`) and run `cargo tauri build` in `gui/`.
+`pnpm tauri dev` starts Vite and the app together and reloads the window as the frontend changes.
+To pass options to the app, put them after two `--`: `pnpm tauri dev -- -- --data-dir <dir>`. It
+accepts `--data-dir <dir>` and `--port <port>` like the CLI, and uses the same data directory by
+default, so don't run both at once. `pnpm tauri build` makes an app bundle.
+
+In `gui/src/`, `store.ts` is a single [zustand](https://zustand.docs.pmnd.rs) store with
+everything the components share: the server's status (polled once a second), the commands in
+flight, the toast and the pairing requests on screen. `backend/` has the typed Tauri commands and
+the shapes of what they return, `components/` the React components by area of the window, and
+`styles/` the CSS. `pnpm lint`, `pnpm format` and `pnpm build` (which typechecks) check the
+frontend; `pnpm install` also sets up a pre-commit hook that runs ESLint and Prettier on staged
+files.
 
 The GUI is a workspace member but not a default member, so `cargo build` and `cargo test` at the
 root don't build it (on Linux it needs the WebKitGTK development packages).

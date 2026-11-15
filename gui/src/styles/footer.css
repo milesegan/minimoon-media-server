@@ -1,0 +1,32 @@
+/* The footer's quiet maintenance links. */
+
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 14px;
+  margin-top: auto;
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+/* Text lines up with the cards' edges; the hover padding hangs outside. */
+footer > .maintenance {
+  margin-left: -6px;
+}
+
+footer > .data-folder {
+  margin-left: auto;
+  margin-right: -6px;
+}
+
+.maintenance {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.separator {
+  color: var(--muted);
+}

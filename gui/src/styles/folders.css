@@ -1,0 +1,147 @@
+/* Shared folder rows: the status column, the progress bar and the scan-error list. */
+
+.folder.offline .chip {
+  background: var(--chip-bg);
+  color: var(--muted);
+}
+
+.folder.offline .row-title {
+  color: var(--offline-text);
+}
+
+/* Two right-aligned lines: what's normal, or what's wrong. */
+.status {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.status > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status .main {
+  font-size: 12.5px;
+}
+
+.status .sub {
+  margin-top: 1px;
+  color: var(--muted);
+}
+
+.status .busy {
+  color: var(--accent);
+  font-weight: 550;
+}
+
+.status .warn {
+  color: var(--amber);
+}
+
+.status .quiet {
+  color: var(--muted);
+}
+
+.pill {
+  display: inline-block;
+  padding: 1px 9px;
+  border-radius: 999px;
+  background: var(--error-bg);
+  color: var(--error);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+/* Under the row, lined up with the name. */
+.progress,
+details.errors {
+  margin: 0 12px 0 56px;
+}
+
+.progress {
+  height: 4px;
+  margin-bottom: 12px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.progress .bar {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--accent-fill);
+  transition: width 0.3s;
+}
+
+.progress.indeterminate .bar {
+  width: 30%;
+  animation: slide 1.2s ease-in-out infinite;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+details.errors {
+  margin-top: -2px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+details.errors summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  list-style: none;
+  color: var(--error);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+details.errors summary::-webkit-details-marker {
+  display: none;
+}
+
+details.errors summary svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s;
+}
+
+details.errors[open] summary svg {
+  transform: rotate(90deg);
+}
+
+details.errors ul {
+  max-height: 180px;
+  margin: 6px 0 0;
+  padding: 8px 10px 8px 26px;
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  overflow: auto;
+  list-style: disc;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+details.errors li + li {
+  margin-top: 3px;
+}

@@ -1,0 +1,164 @@
+/* Titled sections, cards, and the rows and icon chips they hold; empty states. */
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 24px;
+  margin: 0 4px 6px;
+}
+
+/* The add button's text lines up with the card's right edge, not its hover padding. */
+.section-head .text-button {
+  margin-right: -6px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.list > li + li,
+.setting + .list > li:first-child,
+.setting ~ .empty {
+  border-top: 1px solid var(--divider);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 8px 8px 12px;
+}
+
+.chip {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.chip svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chip.neutral {
+  background: var(--chip-bg);
+  color: var(--chip-text);
+}
+
+.row-main {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.row-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The name trims itself, so the rename field's border and focus ring aren't clipped. */
+.folder .row-title {
+  overflow: visible;
+}
+
+.folder .row-title .name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row-title input {
+  width: 100%;
+  max-width: 320px;
+  margin: -3px 0 -2px -10px;
+  padding: 2px 9px;
+  font-weight: 600;
+}
+
+.row-sub {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Long paths lose their start, not their end: the folder's own name matters most. */
+.row-sub.path {
+  direction: rtl;
+  text-align: left;
+}
+
+.empty {
+  margin: 0;
+  padding: 11px 14px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 26px 24px 24px;
+  text-align: center;
+}
+
+.chip.large {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 10px;
+  border-radius: 11px;
+}
+
+.chip.large svg {
+  width: 22px;
+  height: 22px;
+}
+
+.empty-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.empty-state .hint {
+  max-width: 340px;
+  margin: 2px 0 14px;
+}
