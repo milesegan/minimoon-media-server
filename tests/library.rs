@@ -17,15 +17,15 @@ fn options(data: &Path) -> LibraryOptions {
 }
 
 fn index(library: &Library) -> Value {
-    let published = library.published();
-    let slice = &published.slices[0];
-    serde_json::from_slice(&slice.index.as_ref().unwrap().full.plain).unwrap()
+    serde_json::from_slice(&library.published().index.full.plain).unwrap()
 }
 
 fn etags(library: &Library) -> (String, String) {
     let published = library.published();
-    let index = published.slices[0].index.clone().unwrap();
-    (index.full.etag.clone(), index.files.etag.clone())
+    (
+        published.index.full.etag.clone(),
+        published.index.files.etag.clone(),
+    )
 }
 
 fn item<'a>(index: &'a Value, path: &str) -> Option<&'a Value> {
@@ -62,7 +62,6 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir, Library, Uuid) {
     fs::write(media.path().join("Album/01.flac"), b"not really flac").unwrap();
     fs::write(media.path().join("Album/cover.jpg"), b"jpeg").unwrap();
     let library = Library::start(options(data.path())).unwrap();
-    library.ensure_default_slice().unwrap();
     let folder = library.add_shared_folder(media.path(), None).unwrap();
     (media, data, library, folder)
 }
@@ -254,44 +253,54 @@ fn a_scan_error_publishes_nothing() {
 }
 
 #[test]
-fn slice_changes_reach_subscribers() {
-    let (_media, _data, library, folder) = setup();
+fn index_and_folder_changes_reach_subscribers() {
+    let (media, _data, library, folder) = setup();
     eventually(&library, "first scan", |index| {
         index["items"].as_array().unwrap().len() == 2
     });
+    let drain = |events: &mut tokio::sync::broadcast::Receiver<ServerEvent>| {
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event);
+        }
+        seen
+    };
     let mut events = library.subscribe();
-    let id = library
-        .create_slice(
-            "Covers",
-            None,
-            minimoon_media_server::slices::SliceExpr::Selection {
-                folders: vec![],
-                files: vec![minimoon_media_server::slices::TreePath {
-                    folder,
-                    path: vec!["Album".into(), "01.flac".into()],
-                }],
-            },
-            true,
-        )
-        .unwrap();
+
+    // Renaming a shared folder changes the folder list and the full index (its root folder's
+    // name), but not the file list.
+    let (_, files_before) = etags(&library);
+    library.rename_shared_folder(folder, "Renamed").unwrap();
     library.wait_until_idle(WAIT);
-    let mut seen = Vec::new();
-    while let Ok(event) = events.try_recv() {
-        seen.push(event);
-    }
-    assert!(seen.contains(&ServerEvent::SlicesChanged), "{seen:?}");
-    assert!(seen.iter().any(
-        |event| matches!(event, ServerEvent::SliceChanged { slice_id, .. } if *slice_id == id)
-    ));
-    // Selecting the file brought its folder's cover along.
-    let published = library.published();
-    let slice = published.slice(id).unwrap();
-    let body: Value = serde_json::from_slice(&slice.index.as_ref().unwrap().full.plain).unwrap();
-    assert_eq!(body["items"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        library.companions(folder, "Album/01.flac"),
-        vec!["Album/cover.jpg"]
+    let seen = drain(&mut events);
+    assert!(
+        seen.contains(&ServerEvent::SharedFoldersChanged),
+        "{seen:?}"
     );
+    let (etag, files_etag) = etags(&library);
+    assert_eq!(files_etag, files_before);
+    assert!(seen.contains(&ServerEvent::IndexChanged {
+        etag: etag.clone(),
+        files_etag: files_etag.clone()
+    }));
+
+    // A new file changes both ETags, and the event names the ETags now served.
+    fs::write(media.path().join("Album/02.flac"), b"not really flac").unwrap();
+    eventually(&library, "the new file", |index| {
+        item(index, "Album/02.flac").is_some()
+    });
+    let seen = drain(&mut events);
+    let (etag, files_etag) = etags(&library);
+    assert!(
+        !seen.contains(&ServerEvent::SharedFoldersChanged),
+        "{seen:?}"
+    );
+    assert_eq!(
+        seen.last(),
+        Some(&ServerEvent::IndexChanged { etag, files_etag }),
+        "{seen:?}"
+    );
+    assert_ne!(etags(&library).1, files_before);
 }
 
 /// macOS: a write made while the server was stopped is replayed from the stored FSEvents event

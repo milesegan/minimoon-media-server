@@ -116,7 +116,7 @@ pub fn authorize(published: &Published, headers: &HeaderMap) -> Result<Option<St
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/server", get(server_info))
-        .route("/v1/slices/{id}/index", get(slice_index))
+        .route("/v1/index", get(library_index))
         .route("/v1/items/{id}/content", get(item_content))
         .route("/v1/items/{id}/content-url", get(pairing::content_url))
         .route("/v1/items/{id}/art", get(item_art))
@@ -162,7 +162,7 @@ struct ServerInfo<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     shared_folders: Option<Vec<FolderInfo<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    slices: Option<Vec<SliceListing<'a>>>,
+    index: Option<IndexInfo<'a>>,
 }
 
 #[derive(Serialize)]
@@ -185,21 +185,16 @@ struct FolderInfo<'a> {
     available: bool,
 }
 
+/// The current ETags of the full index and the file list.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SliceListing<'a> {
-    id: Uuid,
-    name: &'a str,
-    kind: &'a str,
-    available: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    etag: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    files_etag: Option<&'a str>,
+struct IndexInfo<'a> {
+    etag: &'a str,
+    files_etag: &'a str,
 }
 
 /// `GET /v1/server`: never needs a token. An unpaired client in pairing mode gets it without
-/// the folders and slices.
+/// the folders and the index ETags.
 async fn server_info(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let published = state.published();
     let paired = authorize(&published, &headers).is_ok();
@@ -227,19 +222,9 @@ async fn server_info(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 })
                 .collect()
         }),
-        slices: paired.then(|| {
-            published
-                .slices
-                .iter()
-                .map(|slice| SliceListing {
-                    id: slice.id,
-                    name: &slice.name,
-                    kind: &slice.kind,
-                    available: slice.index.is_some(),
-                    etag: slice.index.as_ref().map(|i| i.full.etag.as_str()),
-                    files_etag: slice.index.as_ref().map(|i| i.files.etag.as_str()),
-                })
-                .collect()
+        index: paired.then(|| IndexInfo {
+            etag: &published.index.full.etag,
+            files_etag: &published.index.files.etag,
         }),
     };
     let mut response = json_response(StatusCode::OK, &info);
@@ -268,10 +253,9 @@ fn accepts_gzip(headers: &HeaderMap) -> bool {
         })
 }
 
-/// `GET /v1/slices/{id}/index[?view=full|files]`.
-async fn slice_index(
+/// `GET /v1/index[?view=full|files]`: every item in every shared folder.
+async fn library_index(
     State(state): State<AppState>,
-    Path(id): Path<String>,
     RawQuery(query): RawQuery,
     method: Method,
     headers: HeaderMap,
@@ -296,16 +280,7 @@ async fn slice_index(
             };
         }
     }
-    let Some(slice) = id.parse::<Uuid>().ok().and_then(|id| published.slice(id)) else {
-        return error(StatusCode::NOT_FOUND, "not_found", "no such slice");
-    };
-    let Some(index) = &slice.index else {
-        return error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "slice_unavailable",
-            "this slice needs a newer version of the server",
-        );
-    };
+    let index = &published.index;
     let representation = if view == "files" {
         &index.files
     } else {
@@ -407,14 +382,9 @@ async fn item_lyrics(
 
 fn sse_event(event: &ServerEvent) -> Event {
     match event {
-        ServerEvent::SliceChanged {
-            slice_id,
-            etag,
-            files_etag,
-        } => Event::default().event("slice-changed").data(
-            serde_json::json!({"sliceId": slice_id, "etag": etag, "filesEtag": files_etag})
-                .to_string(),
-        ),
+        ServerEvent::IndexChanged { etag, files_etag } => Event::default()
+            .event("index-changed")
+            .data(serde_json::json!({"etag": etag, "filesEtag": files_etag}).to_string()),
         ServerEvent::FolderAvailability {
             shared_folder_id,
             available,
@@ -422,12 +392,14 @@ fn sse_event(event: &ServerEvent) -> Event {
             serde_json::json!({"sharedFolderId": shared_folder_id, "available": available})
                 .to_string(),
         ),
-        ServerEvent::SlicesChanged => Event::default().event("slices-changed").data("{}"),
+        ServerEvent::SharedFoldersChanged => {
+            Event::default().event("shared-folders-changed").data("{}")
+        }
     }
 }
 
 /// `GET /v1/events`: Server-Sent Events. Events are hints; a client that falls behind gets
-/// `slices-changed` so it re-checks everything.
+/// `shared-folders-changed` so it re-checks everything.
 ///
 /// The stream closes when its device is revoked or the server pauses.
 async fn events(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -463,7 +435,9 @@ fn event_stream(
     tokio_stream::wrappers::BroadcastStream::new(receiver).map(|item| {
         Ok(match item {
             Ok(event) => sse_event(&event),
-            Err(BroadcastStreamRecvError::Lagged(_)) => sse_event(&ServerEvent::SlicesChanged),
+            Err(BroadcastStreamRecvError::Lagged(_)) => {
+                sse_event(&ServerEvent::SharedFoldersChanged)
+            }
         })
     })
 }

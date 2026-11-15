@@ -21,7 +21,7 @@ Shares folders with the MiniMoon and Matinee apps over the MiniMoon Media Protoc
 Folders given here are added to the saved shared folders.
 
 options:
-  --data-dir <dir>              settings, slices and the index (default: the app-data folder)
+  --data-dir <dir>              settings and the index (default: the app-data folder)
   --port <port>                 port to listen on (default 41325)
   --bind <address>              address to listen on (default: every IPv4 interface)
   --name <name>                 display name shown to devices (saved)
@@ -210,7 +210,6 @@ async fn main() -> Result<()> {
     for folder in &options.folders {
         server.library().add_shared_folder(folder, None)?;
     }
-    server.library().ensure_default_slice()?;
     update_excluded(&server, &options)?;
     if let Some(name) = options.name.clone() {
         server.set_name(Some(name))?;

@@ -88,7 +88,6 @@ async fn start() -> Fixture {
         .library()
         .add_shared_folder(media.path(), Some("Music".into()))
         .unwrap();
-    server.library().ensure_default_slice().unwrap();
     let port = server.local_addr().await.unwrap().port();
     let fixture = Fixture {
         media,
@@ -130,24 +129,8 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn slice_id(&self) -> String {
-        self.server_info().await["slices"][0]["id"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    }
-
     async fn try_index(&self) -> Result<Value, StatusCode> {
-        let info = self.server_info().await;
-        let Some(id) = info["slices"][0]["id"].as_str() else {
-            return Err(StatusCode::NOT_FOUND);
-        };
-        let response = self
-            .client
-            .get(self.url(&format!("/v1/slices/{id}/index")))
-            .send()
-            .await
-            .unwrap();
+        let response = self.client.get(self.url("/v1/index")).send().await.unwrap();
         if response.status() != StatusCode::OK {
             return Err(response.status());
         }
@@ -169,7 +152,7 @@ impl Fixture {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn server_info_lists_folders_and_slices() {
+async fn server_info_lists_folders_and_index_etags() {
     let f = start().await;
     let info = f.server_info().await;
     assert_eq!(info["auth"], "none");
@@ -177,19 +160,28 @@ async fn server_info_lists_folders_and_slices() {
     assert_eq!(info["software"]["name"], "minimoon-media-server");
     assert_eq!(info["sharedFolders"][0]["name"], "Music");
     assert_eq!(info["sharedFolders"][0]["available"], true);
-    let slice = &info["slices"][0];
-    assert_eq!(slice["name"], "Everything");
-    assert_eq!(slice["available"], true);
-    assert!(slice["etag"].as_str().unwrap().starts_with("W/\""));
-    assert!(slice["filesEtag"].as_str().unwrap().starts_with("W/\""));
+    assert!(info.get("slices").is_none());
+    let etag = info["index"]["etag"].as_str().unwrap();
+    let files_etag = info["index"]["filesEtag"].as_str().unwrap();
+    assert!(etag.starts_with("W/\""));
+    assert!(files_etag.starts_with("W/\""));
+    // They're the ETags `/v1/index` answers with.
+    let full = f.client.get(f.url("/v1/index")).send().await.unwrap();
+    assert_eq!(full.headers()[header::ETAG].to_str().unwrap(), etag);
+    let files = f
+        .client
+        .get(f.url("/v1/index?view=files"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(files.headers()[header::ETAG].to_str().unwrap(), files_etag);
     f.server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn index_has_weak_etags_304s_gzip_and_both_views() {
     let f = start().await;
-    let id = f.slice_id().await;
-    let url = f.url(&format!("/v1/slices/{id}/index"));
+    let url = f.url("/v1/index");
     let response = f.client.get(&url).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let etag = response.headers()[header::ETAG]
@@ -260,6 +252,17 @@ async fn index_has_weak_etags_304s_gzip_and_both_views() {
     let bad: Value = bad.json().await.unwrap();
     assert_eq!(bad["error"]["code"], "unsupported_feature");
 
+    // The file list answers 304 to its own ETag.
+    let files_not_modified = f
+        .client
+        .get(format!("{url}?view=files"))
+        .header(header::IF_NONE_MATCH, &files_etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(files_not_modified.status(), StatusCode::NOT_MODIFIED);
+
+    // The old per-slice route is gone, like any unknown route.
     let missing = f
         .client
         .get(f.url("/v1/slices/6b0e0000-0000-4000-8000-000000000000/index"))
@@ -267,6 +270,8 @@ async fn index_has_weak_etags_304s_gzip_and_both_views() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let missing: Value = missing.json().await.unwrap();
+    assert_eq!(missing["error"]["code"], "not_found");
     f.server.shutdown().await;
 }
 
@@ -476,31 +481,20 @@ async fn art_lyrics_and_resizing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unpublished_items_are_not_served() {
+async fn removed_items_are_not_served() {
     let f = start().await;
     let id = f.item_id("small.bin").await;
-    let slice: uuid::Uuid = f.slice_id().await.parse().unwrap();
-    f.server
-        .library()
-        .set_slice_published(slice, false)
-        .unwrap();
-    f.server.library().wait_until_idle(WAIT);
-    let info = f.server_info().await;
-    assert_eq!(info["slices"], serde_json::json!([]));
-    let response = f
-        .client
-        .get(f.url(&format!("/v1/items/{id}/content")))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let index = f
-        .client
-        .get(f.url(&format!("/v1/slices/{slice}/index")))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(index.status(), StatusCode::NOT_FOUND);
+    std::fs::remove_file(f.media.path().join("small.bin")).unwrap();
+    f.wait_for_items(3).await;
+    for route in ["content", "art", "lyrics"] {
+        let response = f
+            .client
+            .get(f.url(&format!("/v1/items/{id}/{route}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+    }
     f.server.shutdown().await;
 }
 
@@ -508,14 +502,13 @@ async fn unpublished_items_are_not_served() {
 async fn pairing_tokens_signed_urls_and_revocation() {
     let f = start().await;
     let id = f.item_id("big.bin").await;
-    let slice = f.slice_id().await;
     f.server.set_auth_mode(AuthMode::Pairing).unwrap();
 
     let info = f.server_info().await;
     assert_eq!(info["auth"], "pairing");
-    assert!(info.get("slices").is_none());
+    assert!(info.get("index").is_none());
     assert!(info.get("sharedFolders").is_none());
-    let index_url = f.url(&format!("/v1/slices/{slice}/index"));
+    let index_url = f.url("/v1/index");
     let unpaired = f.client.get(&index_url).send().await.unwrap();
     assert_eq!(unpaired.status(), StatusCode::UNAUTHORIZED);
     let unpaired: Value = unpaired.json().await.unwrap();
@@ -586,7 +579,8 @@ async fn pairing_tokens_signed_urls_and_revocation() {
         .json()
         .await
         .unwrap();
-    assert!(info["slices"].is_array());
+    assert!(info["sharedFolders"].is_array());
+    assert!(info["index"]["etag"].is_string());
 
     let signed: Value = f
         .client
@@ -651,22 +645,35 @@ async fn pairing_tokens_signed_urls_and_revocation() {
     f.server.shutdown().await;
 }
 
+/// Reads an SSE response until `text` holds `wanted`.
+async fn read_events_until(response: &mut reqwest::Response, text: &mut String, wanted: &str) {
+    let deadline = Instant::now() + WAIT;
+    while !text.contains(wanted) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "no {wanted}: {text}");
+        if let Ok(Ok(Some(chunk))) = tokio::time::timeout(remaining, response.chunk()).await {
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn events_announce_slice_changes() {
+async fn events_announce_index_and_folder_changes() {
     let f = start().await;
     let mut events = f.client.get(f.url("/v1/events")).send().await.unwrap();
     assert_eq!(events.headers()[header::CONTENT_TYPE], "text/event-stream");
     std::fs::write(f.media.path().join("new.bin"), b"new").unwrap();
-    let deadline = Instant::now() + WAIT;
     let mut text = String::new();
-    while !text.contains("event: slice-changed") {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(!remaining.is_zero(), "no slice-changed event: {text}");
-        if let Ok(Ok(Some(chunk))) = tokio::time::timeout(remaining, events.chunk()).await {
-            text.push_str(&String::from_utf8_lossy(&chunk));
-        }
-    }
+    read_events_until(&mut events, &mut text, "event: index-changed").await;
     assert!(text.contains("\"filesEtag\""));
+    assert!(!text.contains("sliceId"));
+
+    let folder = f.server.library().shared_folders()[0].id;
+    f.server
+        .library()
+        .rename_shared_folder(folder, "Tunes")
+        .unwrap();
+    read_events_until(&mut events, &mut text, "event: shared-folders-changed").await;
     f.server.shutdown().await;
 }
 

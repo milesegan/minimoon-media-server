@@ -4,8 +4,9 @@ The LAN media server behind the MiniMoon and Matinee apps. It shares folders of 
 video with devices on the same network over the MiniMoon Media Protocol (MMP) v1, specified in
 [docs/minimoon-media-protocol-v1.md](docs/minimoon-media-protocol-v1.md).
 
-- **One index per slice, one request.** Clients download a slice's whole index, with a weak
-  ETag and `304 Not Modified`, and keep a local copy.
+- **One index, one request.** Clients download the whole index of every shared folder, with a
+  weak ETag and `304 Not Modified`, keep a local copy, and choose on the device which shared
+  folders to show or copy.
 - **Facts, not interpretation.** Tags are read with a copy of the apps' own tag reader, and
   video stream facts (codecs, HDR, Dolby Vision, tracks) with a native Rust reader.
 - **Read-only.** Nothing is ever written into the shared folders.
@@ -29,7 +30,7 @@ cargo run --release -- ~/Music ~/Movies
 ```
 
 Folders given on the command line are added to the saved shared folders, so later runs need no
-arguments. On a fresh install the server publishes one slice, "Everything". The server prints a
+arguments. The server publishes everything under its shared folders. It prints a
 summary that marks any shared folder it isn't serving yet: a folder is shared only once its first
 index is complete. In a terminal, a progress bar shows indexing and background metadata updates.
 The server then prints a line when a folder becomes shared or goes offline, a line once the first
@@ -37,7 +38,7 @@ scan has indexed everything, and a pairing code whenever a device asks to pair.
 
 Options:
 
-- `--data-dir <dir>`: where the settings, slices, index and art cache live. The default is
+- `--data-dir <dir>`: where the settings, index and art cache live. The default is
   `com.plastaq.sync-server/media-server` in the platform's app-data folder (on macOS,
   `~/Library/Application Support`).
 - `--port <port>`: the port to listen on, 41325 by default.
@@ -61,12 +62,12 @@ All routes are under `/v1`; see the spec for the full contract.
 
 | Route | |
 |---|---|
-| `GET /v1/server` | Server id, name, auth mode, protocol version and features, shared folders, published slices with their ETags |
-| `GET /v1/slices/{id}/index[?view=files]` | A slice's full index, or its file list |
+| `GET /v1/server` | Server id, name, auth mode, protocol version and features, shared folders, and the index's current ETags |
+| `GET /v1/index[?view=files]` | The full index of every shared folder, or its file list |
 | `GET /v1/items/{id}/content` | File bytes, with ranges, `If-Range` and `If-None-Match` |
 | `GET /v1/items/{id}/art[?maxSize=N]` | The first embedded picture, optionally resized to JPEG |
 | `GET /v1/items/{id}/lyrics` | Embedded lyrics as plain text |
-| `GET /v1/events` | Server-Sent Events: `slice-changed`, `folder-availability`, `slices-changed` |
+| `GET /v1/events` | Server-Sent Events: `index-changed`, `folder-availability`, `shared-folders-changed` |
 | `POST /v1/pair`, `POST /v1/pair/{id}/confirm` | Pairing (when pairing is on) |
 | `GET /v1/items/{id}/content-url`, `GET /v1/c/{id}?…` | Signed media URLs for players that can't send headers |
 
@@ -74,8 +75,7 @@ All routes are under `/v1`; see the spec for the full contract.
 
 - **Settings** (`settings.json`): the server id, shared folders with their UUIDs, display names
   and volume mount points, bumped `rev` values, the last FSEvents event id, and pairing state.
-  Slice definitions are in `slices.json`. Neither can be rebuilt from the disks, so neither is
-  ever replaced silently.
+  None of it can be rebuilt from the disks, so the file is never replaced silently.
 - **Index** (`index.sqlite`): each shared folder's last published snapshot, with every file's
   metadata, reader version and read status. Deleting it loses nothing that the next scan
   doesn't read again; ids and `rev` values come back unchanged.
@@ -106,10 +106,8 @@ use minimoon_media_server::{LibraryOptions, MediaServer, ServerOptions};
 
 let server = MediaServer::start(ServerOptions::new(LibraryOptions::new(data_dir))).await?;
 let folder = server.library().add_shared_folder(path, None)?;
-server.library().ensure_default_slice()?;
 ```
 
 `Library` covers shared folders (add, rename, remove, publish without unreadable subfolders),
-slices (create, update, publish, delete, companion previews, migrating the Sync app's presets),
 "Reindex everything" and per-folder status with error counts. `MediaServer` adds pausing,
 pairing mode, paired devices and revocation, the display name and "Keep this computer awake".

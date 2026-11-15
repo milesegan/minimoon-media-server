@@ -1,7 +1,7 @@
 //! Item and folder ids (spec §5, identity).
 //!
-//! An id is a hash of the shared folder's UUID and the path, so it survives index rebuilds, is
-//! the same in every slice, and changes only when the file is moved or renamed on disk.
+//! An id is a hash of the shared folder's UUID and the path, so it survives index rebuilds and
+//! changes only when the file is moved or renamed on disk.
 
 use base64::Engine;
 use sha2::{Digest, Sha256};

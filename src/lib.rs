@@ -14,7 +14,6 @@ pub mod scan;
 pub mod server;
 pub mod settings;
 pub mod sleep;
-pub mod slices;
 pub mod volume;
 pub mod watch;
 

@@ -1,16 +1,15 @@
 //! What the HTTP routes serve: an immutable view of the server's state, rebuilt whenever the
-//! index, the shared folders or the slices change (spec §4, §5).
+//! index or the shared folders change (spec §4, §5).
 //!
-//! Each published slice's index is built here in both views with its weak ETag, so `/v1/server`
-//! can advertise the ETags and `/index` can answer `304` without touching the index. Item routes
-//! look items up in [`Published::items`], which holds only items in at least one published,
-//! available slice: everything else is answered as if it didn't exist (spec §8, enforcement).
+//! The index of every shared folder is built here in both views with its weak ETag, so
+//! `/v1/server` can advertise the ETags and `/v1/index` can answer `304` without touching the
+//! database. Item routes look items up in [`Published::items`], which holds every indexed item:
+//! anything else is answered as if it didn't exist (spec §8, enforcement).
 
 use crate::ids::{folder_id, item_id, weak_etag};
 use crate::index::{FileRecord, Snapshot};
 use crate::reader::{file_type, Reader};
 use crate::settings::{AuthMode, PairedDevice, Settings, SharedFolderSettings};
-use crate::slices::{evaluate, split_path, SliceExpr, SliceFile};
 use bytes::Bytes;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
@@ -18,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
 
-/// One representation of a slice's index: its JSON body and weak ETag.
+/// One representation of the index: its JSON body and weak ETag.
 #[derive(Debug)]
 pub struct Representation {
     pub etag: String,
@@ -48,21 +47,11 @@ impl Representation {
     }
 }
 
-/// A slice's index in both views.
+/// The index in both views.
 #[derive(Debug)]
-pub struct SliceIndex {
+pub struct IndexViews {
     pub full: Representation,
     pub files: Representation,
-}
-
-/// A slice as `/v1/server` lists it.
-#[derive(Debug)]
-pub struct PublishedSlice {
-    pub id: Uuid,
-    pub name: String,
-    pub kind: String,
-    /// `None` when the slice's definition couldn't be parsed: listed with `available: false`.
-    pub index: Option<Arc<SliceIndex>>,
 }
 
 /// A shared folder as the routes see it.
@@ -100,7 +89,7 @@ pub struct Published {
     pub server_id: Uuid,
     pub name: String,
     pub folders: Arc<Vec<PublishedFolder>>,
-    pub slices: Arc<Vec<PublishedSlice>>,
+    pub index: Arc<IndexViews>,
     pub items: Arc<HashMap<String, ServedItem>>,
     pub auth: Arc<AuthState>,
 }
@@ -112,7 +101,7 @@ impl Published {
             server_id: settings.server_id,
             name: settings.display_name(),
             folders: Arc::new(Vec::new()),
-            slices: Arc::new(Vec::new()),
+            index: Arc::new(build_index(settings, &[], &mut ItemCache::default()).0),
             items: Arc::new(HashMap::new()),
             auth: Arc::new(auth_state(settings)),
         }
@@ -120,10 +109,6 @@ impl Published {
 
     pub fn folder(&self, id: Uuid) -> Option<&PublishedFolder> {
         self.folders.iter().find(|folder| folder.id == id)
-    }
-
-    pub fn slice(&self, id: Uuid) -> Option<&PublishedSlice> {
-        self.slices.iter().find(|slice| slice.id == id)
     }
 }
 
@@ -208,6 +193,14 @@ impl ItemCache {
     }
 }
 
+/// Splits an index path into its folder part and file name.
+fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(slash) => (&path[..slash], &path[slash + 1..]),
+        None => ("", path),
+    }
+}
+
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("strings serialize")
 }
@@ -256,13 +249,8 @@ fn item_json(folder: Uuid, path: &str, record: &FileRecord, rev: u64) -> (String
     (full, files)
 }
 
-/// Builds what the routes serve from the settings, the slices and every folder's snapshot.
-pub fn build(
-    settings: &Settings,
-    slices: &SliceFile,
-    folders: &[FolderView<'_>],
-    cache: &mut ItemCache,
-) -> Published {
+/// Builds what the routes serve from the settings and every folder's snapshot.
+pub fn build(settings: &Settings, folders: &[FolderView<'_>], cache: &mut ItemCache) -> Published {
     let published_folders: Vec<PublishedFolder> = folders
         .iter()
         .map(|view| PublishedFolder {
@@ -270,16 +258,6 @@ pub fn build(
             name: view.settings.name.clone(),
             available: view.available(),
             root: view.settings.path.clone(),
-        })
-        .collect();
-
-    // Each folder's paths, sorted, for evaluating selections.
-    let paths: Vec<Vec<&str>> = folders
-        .iter()
-        .map(|view| {
-            view.snapshot
-                .map(|snapshot| snapshot.keys().map(String::as_str).collect())
-                .unwrap_or_default()
         })
         .collect();
 
@@ -293,87 +271,44 @@ pub fn build(
     }
     cache.retain(&live);
 
-    let mut items: HashMap<String, ServedItem> = HashMap::new();
-    let mut published_slices = Vec::new();
-    for entry in slices.slices.iter().filter(|entry| entry.published) {
-        let Ok(slice) = &entry.parsed else {
-            published_slices.push(PublishedSlice {
-                id: entry.id,
-                name: entry.name.clone(),
-                kind: entry.kind.clone(),
-                index: None,
-            });
-            continue;
-        };
-        let index = build_slice_index(
-            settings,
-            &slice.definition,
-            folders,
-            &paths,
-            cache,
-            &mut items,
-        );
-        published_slices.push(PublishedSlice {
-            id: slice.id,
-            name: slice.name.clone(),
-            kind: slice.kind.as_str().to_string(),
-            index: Some(Arc::new(index)),
-        });
-    }
-
+    let (index, items) = build_index(settings, folders, cache);
     Published {
         server_id: settings.server_id,
         name: settings.display_name(),
         folders: Arc::new(published_folders),
-        slices: Arc::new(published_slices),
+        index: Arc::new(index),
         items: Arc::new(items),
         auth: Arc::new(auth_state(settings)),
     }
 }
 
-/// Whether a definition can include files from a shared folder.
-fn references(definition: &SliceExpr, folder: Uuid) -> bool {
-    match definition {
-        SliceExpr::All => true,
-        SliceExpr::Selection { folders, files } => folders
-            .iter()
-            .chain(files)
-            .any(|tree| tree.folder == folder),
-    }
-}
-
-fn build_slice_index(
+/// The index of every shared folder in both views, and the items it lists by id.
+fn build_index(
     settings: &Settings,
-    definition: &SliceExpr,
     folders: &[FolderView<'_>],
-    paths: &[Vec<&str>],
     cache: &mut ItemCache,
-    served: &mut HashMap<String, ServedItem>,
-) -> SliceIndex {
+) -> (IndexViews, HashMap<String, ServedItem>) {
     let mut folder_json: Vec<String> = Vec::new();
     let mut full_items: Vec<Arc<str>> = Vec::new();
     let mut file_items: Vec<Arc<str>> = Vec::new();
     let mut offline: Vec<String> = Vec::new();
+    let mut served: HashMap<String, ServedItem> = HashMap::new();
 
-    for (view, folder_paths) in folders.iter().zip(paths) {
+    for view in folders {
         let folder = view.settings.id;
-        if !references(definition, folder) {
-            continue;
-        }
         if !view.available() {
             offline.push(folder.to_string());
         }
         let Some(snapshot) = view.snapshot else {
             continue;
         };
-        let selected = evaluate(definition, folder, folder_paths);
-        if selected.is_empty() {
+        if snapshot.is_empty() {
             continue;
         }
         // Every ancestor folder of every item, up to and including the shared folder.
         let mut dirs: BTreeSet<&str> = BTreeSet::new();
         dirs.insert("");
-        for path in &selected {
+        for path in snapshot.keys() {
             let mut dir = split_path(path).0;
             while !dir.is_empty() && dirs.insert(dir) {
                 dir = split_path(dir).0;
@@ -400,21 +335,22 @@ fn build_slice_index(
             }
             folder_json.push(json);
         }
-        for path in selected {
-            let record = &snapshot[path];
+        for (path, record) in snapshot {
             let rev = settings.rev(folder, path);
             let cached = cache.get(folder, path, record, rev);
             full_items.push(cached.full.clone());
             file_items.push(cached.files.clone());
-            served
-                .entry(item_id(folder, path))
-                .or_insert_with(|| ServedItem {
+            let file_type = file_type(split_path(path).1);
+            served.insert(
+                item_id(folder, path),
+                ServedItem {
                     folder,
-                    path: Arc::from(path),
-                    reader: file_type(split_path(path).1).reader,
-                    mime: file_type(split_path(path).1).mime,
+                    path: Arc::from(path.as_str()),
+                    reader: file_type.reader,
+                    mime: file_type.mime,
                     rev,
-                });
+                },
+            );
         }
     }
 
@@ -434,10 +370,11 @@ fn build_slice_index(
         &offline_json,
     );
     let files = join_body(&[("items", &file_items)], &offline_json);
-    SliceIndex {
+    let views = IndexViews {
         full: Representation::new(full),
         files: Representation::new(files),
-    }
+    };
+    (views, served)
 }
 
 fn folder_json_refs(folders: &[String]) -> Vec<Arc<str>> {
@@ -472,7 +409,6 @@ fn join_body(arrays: &[(&str, &Vec<Arc<str>>)], offline: &str) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::index::ReadStatus;
-    use crate::slices::{Slice, SliceKind, TreePath};
     use crate::volume::VolumeIdentity;
     use serde_json::Value;
 
@@ -497,14 +433,6 @@ mod tests {
         }
     }
 
-    fn slice_file(slices: Vec<Slice>) -> SliceFile {
-        let mut file = SliceFile::parse(br#"{"formatVersion": 1, "slices": []}"#).unwrap();
-        for slice in slices {
-            file.upsert(slice).unwrap();
-        }
-        file
-    }
-
     #[test]
     fn builds_both_views_with_folders_and_offline() {
         let mut settings = Settings::new();
@@ -521,34 +449,6 @@ mod tests {
         );
         snapshot.insert("Jazz/b.flac".into(), record(None));
         snapshot.insert("Rock/c.flac".into(), record(None));
-        let everything = Slice {
-            id: Uuid::new_v4(),
-            name: "Everything".into(),
-            kind: SliceKind::Mixed,
-            published: true,
-            definition: SliceExpr::All,
-        };
-        let jazz = Slice {
-            id: Uuid::new_v4(),
-            name: "Jazz".into(),
-            kind: SliceKind::Music,
-            published: true,
-            definition: SliceExpr::Selection {
-                folders: vec![TreePath {
-                    folder: music.id,
-                    path: vec!["Jazz".into()],
-                }],
-                files: vec![],
-            },
-        };
-        let hidden = Slice {
-            id: Uuid::new_v4(),
-            name: "Hidden".into(),
-            kind: SliceKind::Music,
-            published: false,
-            definition: SliceExpr::All,
-        };
-        let slices = slice_file(vec![everything.clone(), jazz.clone(), hidden]);
         let views = [
             FolderView {
                 settings: &music,
@@ -561,16 +461,9 @@ mod tests {
                 volume_ok: true,
             },
         ];
-        let published = build(&settings, &slices, &views, &mut ItemCache::default());
-        assert_eq!(published.slices.len(), 2);
+        let published = build(&settings, &views, &mut ItemCache::default());
 
-        let all = published
-            .slice(everything.id)
-            .unwrap()
-            .index
-            .clone()
-            .unwrap();
-        let body: Value = serde_json::from_slice(&all.full.plain).unwrap();
+        let body: Value = serde_json::from_slice(&published.index.full.plain).unwrap();
         assert_eq!(body["items"].as_array().unwrap().len(), 3);
         // The root, Jazz and Rock.
         assert_eq!(body["folders"].as_array().unwrap().len(), 3);
@@ -592,23 +485,18 @@ mod tests {
         assert!(root.get("parentId").is_none());
         assert_eq!(a["parentId"], body["folders"][1]["id"]);
 
-        let files: Value = serde_json::from_slice(&all.files.plain).unwrap();
+        let files: Value = serde_json::from_slice(&published.index.files.plain).unwrap();
         assert!(files.get("folders").is_none());
         assert_eq!(
             files["items"][0].as_object().unwrap().len(),
             6,
             "id, sharedFolderId, path, size, mtime, rev"
         );
+        assert_eq!(files["offline"], body["offline"]);
 
-        // The Jazz slice doesn't reference Movies, so Movies isn't offline for it.
-        let jazz_index = published.slice(jazz.id).unwrap().index.clone().unwrap();
-        let body: Value = serde_json::from_slice(&jazz_index.full.plain).unwrap();
-        assert_eq!(body["items"].as_array().unwrap().len(), 2);
-        assert_eq!(body["offline"], serde_json::json!([]));
-
-        // Only items in a published slice are served.
+        // Every indexed item is served.
         assert_eq!(published.items.len(), 3);
-        assert_ne!(all.full.etag, jazz_index.full.etag);
+        assert_ne!(published.index.full.etag, published.index.files.etag);
     }
 
     #[test]
@@ -616,13 +504,6 @@ mod tests {
         let mut settings = Settings::new();
         let music = folder_settings("Music");
         settings.shared_folders = vec![music.clone()];
-        let slices = slice_file(vec![Slice {
-            id: Uuid::new_v4(),
-            name: "Everything".into(),
-            kind: SliceKind::Mixed,
-            published: true,
-            definition: SliceExpr::All,
-        }]);
         let build_with = |meta: Option<&str>, cache: &mut ItemCache| {
             let mut snapshot = Snapshot::new();
             snapshot.insert("a.flac".into(), record(meta));
@@ -631,9 +512,11 @@ mod tests {
                 snapshot: Some(&snapshot),
                 volume_ok: true,
             }];
-            let published = build(&settings, &slices, &views, cache);
-            let index = published.slices[0].index.clone().unwrap();
-            (index.full.etag.clone(), index.files.etag.clone())
+            let published = build(&settings, &views, cache);
+            (
+                published.index.full.etag.clone(),
+                published.index.files.etag.clone(),
+            )
         };
         let mut cache = ItemCache::default();
         let (full_a, files_a) = build_with(None, &mut cache);
@@ -645,15 +528,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unparsed_slice_is_listed_without_an_index() {
+    fn an_empty_server_serves_an_empty_index() {
         let settings = Settings::new();
-        let slices = SliceFile::parse(
-            br#"{"formatVersion": 1, "slices": [{"id": "6b0e0000-0000-4000-8000-000000000000",
-                 "name": "New", "kind": "music", "published": true,
-                 "definition": {"type": "and", "children": []}}]}"#,
-        )
-        .unwrap();
-        let published = build(&settings, &slices, &[], &mut ItemCache::default());
-        assert!(published.slices[0].index.is_none());
+        let published = Published::empty(&settings);
+        let body: Value = serde_json::from_slice(&published.index.full.plain).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"folders": [], "items": [], "offline": []})
+        );
+        assert!(published.items.is_empty());
     }
 }

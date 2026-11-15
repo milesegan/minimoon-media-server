@@ -1,11 +1,11 @@
 # MiniMoon Media Protocol (MMP) v1: proposal
 
-Status: revised 2026-11-14. The server side of protocols 1.0 and 1.1 is built in this repository (§10 lists what's done and what isn't). The shared client package and the apps' support aren't built.
+Status: revised 2026-11-15. The server side of protocols 1.0 and 1.1 is built in this repository (§10 lists what's done and what isn't). The shared client package and the apps' support aren't built.
 
 - **Server:** minimoon-media-server, the renamed minimoon-sync.
 - **Clients:** MiniMoon (macOS, iOS, tvOS) and Matinee (tvOS, macOS).
 - **MMP only:** the server speaks only MMP. The Sync app's protocol (`/files`, `/file-by-path` on port 41324) is dropped, not kept alongside. The apps handle the move from it to MMP; that transition is outside this spec.
-- **Read-only:** clients never write anything to the server or its folders. Every slice and item route is a GET; the only POSTs are the pairing routes (protocol 1.1), which record a device in the server's own settings (§4). Watch progress, play counts, favourites and every other kind of per-user state stay on the client device, as they do today.
+- **Read-only:** clients never write anything to the server or its folders. Every index and item route is a GET; the only POSTs are the pairing routes (protocol 1.1), which record a device in the server's own settings (§4). Watch progress, play counts, favourites and every other kind of per-user state stay on the client device, as they do today.
 
 ## 1. Why this exists: the advantage over Jellyfin, Navidrome and Plex
 
@@ -15,7 +15,7 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
 **Real advantages**
 
 1. **No administration.**
-   - **MMP:** a desktop app with a folder picker and the Sync app's existing file-selection tree, where saved selections become slices (§8). The server appears on the TV over Bonjour and works with no code, account or password. An optional pairing code comes in protocol 1.1 (§4).
+   - **MMP:** a desktop app with a folder picker; each device chooses for itself which shared folders it shows or copies (§4). The server appears on the TV over Bonjour and works with no code, account or password. An optional pairing code comes in protocol 1.1 (§4).
    - **Jellyfin:** its setup wizard creates an admin account and libraries in a web dashboard.
    - **Plex:** needs a plex.tv account.
    - **Navidrome:** runs as a service and is configured by hand.
@@ -51,7 +51,7 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
    - **No client writes:** no route uploads, edits, renames or deletes anything, or stores client data. Play counts, ratings, resume positions, track choices and Fix Match stay in each app's own on-device store.
    - **Nothing written into library folders:** the server writes only its own index, caches and settings, in its app-data directory. No tag edits, sidecars, thumbnails or hidden files next to the media.
    - **The one exception, when pairing is on (1.1):** pairing (§4) records a paired device in the server's own settings. That's the server's configuration, not the shared folders.
-4. **Never lose data on a bad read.** A scan that fails, a drive that's missing or a slice the server can't understand must never look like deleted files to a client (§5).
+4. **Never lose data on a bad read.** A scan that fails or a drive that's missing must never look like deleted files to a client (§5).
 5. **One major version per path, additive changes within it.** Optional parts are listed in `features`. Clients ignore unknown fields and unknown enum values.
 6. **Direct play only.** The server sends original bytes with Range support. Decoding is the client's job (AVFoundation in MiniMoon, VLCKit in Matinee).
 
@@ -67,20 +67,20 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
   - `name`: the display name
   - `auth`: `none` or `pairing`
 - **Manual entry:** clients also accept a typed `host[:port]`.
-- **Client identification:** requests to the JSON routes (`/v1/server`, `/v1/slices/…`, `/v1/events`, pairing) carry `MMP-Client: <app>/<version> (<platform>)`, e.g. `matinee/1.3 (tvOS 26.1)`. Media routes (`content`, `art`, `lyrics` and signed URLs) don't require it, because players like VLCKit and AVPlayer open those URLs themselves and won't send it.
+- **Client identification:** requests to the JSON routes (`/v1/server`, `/v1/index`, `/v1/events`, pairing) carry `MMP-Client: <app>/<version> (<platform>)`, e.g. `matinee/1.3 (tvOS 26.1)`. Media routes (`content`, `art`, `lyrics` and signed URLs) don't require it, because players like VLCKit and AVPlayer open those URLs themselves and won't send it.
 - **Too-old clients:** the server may answer `400` with `error.code = "client_too_old"` for a client version known to be broken. (Not `426`: RFC 9110 §15.5.22 requires an `Upgrade` header naming a protocol to switch to, which doesn't fit "update your app".)
 - **Errors:** always `{"error": {"code": "<stable_snake_case>", "message": "<English, for logs>"}}` with a suitable HTTP status. Clients localize from `code`. v1 codes:
   - `not_paired`, `token_revoked`, `url_expired` (pairing, 1.1)
   - `pairing_expired`, `pairing_code_wrong`, `pairing_locked` (1.1)
   - `not_found`, `range_not_satisfiable`, `method_not_allowed`
-  - `folder_unavailable`, `slice_unavailable`
+  - `folder_unavailable`
   - `client_too_old`, `unsupported_feature`
 
 ## 4. Access: open by default, optional pairing code (1.1)
 
-There is one household and no user accounts. Every client that can reach the server sees every published slice.
+There is one household and no user accounts. Every client that can reach the server sees everything under its shared folders.
 
-**Open (`auth: none`, the default, and the only mode in 1.0).** No token, code or password. Any device on the local network can list the published slices and read the files in them, exactly as with the Sync server today. Clients skip the pairing screen, and media URLs are plain `/v1/items/{id}/content` URLs that VLCKit and AVPlayer can open directly.
+**Open (`auth: none`, the default, and the only mode in 1.0).** No token, code or password. Any device on the local network can read the index and the files under the shared folders, exactly as with the Sync server today. Clients skip the pairing screen, and media URLs are plain `/v1/items/{id}/content` URLs that VLCKit and AVPlayer can open directly.
 
 **Pairing (`auth: pairing`, protocol 1.1, a desktop-app setting: "Require a code for new devices").** A code rather than a password: the server shows six digits and the client asks for them once. There's nothing to remember or retype on each device, and still no account.
 
@@ -99,7 +99,7 @@ There is one household and no user accounts. Every client that can reach the ser
    - **Checked on every request,** including each range request a player makes while seeking: the signature, the expiry, that the device is still paired, and that the generation matches. So a revoked device's URLs fail on their next request, not after the 12-hour expiry, and its open downloads are closed (step 3).
    - **Scope:** the URL grants that item's bytes, whatever version is current; it isn't tied to one version of the file. A file that changes during playback is handled as in §6, which is best effort.
    - **Renewal:** a request after expiry gets `401 url_expired`. The client asks for a new URL and hands it to the player, which covers seeking after a long pause.
-   - **Slices still apply:** a signed URL for an item that's no longer in any published slice gets `404`, like every other route (§8).
+   - **Items that are gone:** a signed URL for an item that's no longer in the index gets `404`, like every other route (§8).
 
 **Switching modes.** Turning pairing on makes connected clients get `401 not_paired`; each shows the pairing screen once. Turning pairing off makes the server ignore tokens.
 
@@ -113,32 +113,22 @@ There is one household and no user accounts. Every client that can reach the ser
   "software": {"name": "minimoon-media-server", "version": "5.0.0"},
   "sharedFolders": [{"id": "a41f…", "name": "Music", "available": true},
                     {"id": "0c9e…", "name": "Movies", "available": false}],
-  "slices":    [{"id": "6b0e…", "name": "Everything", "kind": "mixed", "available": true,
-                 "etag": "W/\"9f2c…\"", "filesEtag": "W/\"18d4…\""},
-                {"id": "2f9a…", "name": "Road Trip", "kind": "music", "available": true,
-                 "etag": "W/\"41ab…\"", "filesEtag": "W/\"e07b…\""},
-                {"id": "c71d…", "name": "Kids", "kind": "mixed", "available": false}]
+  "index": {"etag": "W/\"9f2c…\"", "filesEtag": "W/\"18d4…\""}
 }
 ```
 
 - **One tree.** All shared folders (`sharedFolders`) are merged into a single tree, each appearing as a top-level folder. Each has a permanent `id` and a display `name`, which is only a label (§5, §8).
-- **Slices** are named subsets of that tree, defined in the desktop app (§8). In v1 a slice is a selection of folders and files, like the Sync app's presets: one can take `Music/Jazz` from one disk and `Movies/Concerts` from another. Rule-based slices can come later without a protocol change, because clients never see how a slice is defined, only its files. Only slices switched to "published" in the desktop app are listed.
-- **Each device chooses its slice.** The choice is made in the client app and stored on that device, never on the server, so changing it on one device doesn't affect any other. This is what lets a MiniMoon user give each device its own set of files: "Everything" on the living-room Apple TV, "Road Trip" on a phone with little storage, "Kids" on a child's iPad. A client may follow more than one slice.
-- **The choice stays hidden until there is one.** When the server publishes a single slice (typically "Everything", the whole tree), the client follows it without asking and shows no slice picker anywhere. When a second slice appears, the device keeps following what it already had, and the picker appears in the app's server settings; there is no prompt. Devices remember slices by `id`, so renaming one changes nothing for them.
-- **A followed slice disappears.** If a slice a device follows is no longer listed (deleted or unpublished in the desktop app), the device keeps its copy of that slice's files, shows them as offline, and asks what to follow instead. It never switches to another slice by itself, because a phone falling back from "Road Trip" to "Everything" could start a very large download.
-- **`available: false` on a slice** means the server lists it but can't serve it right now: the definition was made by a newer server version and this one can't read it (§8). Its `/index` answers `503 slice_unavailable` and no content is served through it. Clients keep their copy and show it as offline, exactly as for a missing folder; they never treat it as deleted.
-- **Following several slices.** The client keeps each followed slice's last accepted index separately and shows their union, merged by item `id`. A slice whose refresh fails keeps its previous index, so its files don't drop out of the union.
-  - **One fetch at a time.** A client fetches one server's indexes one after another, never overlapping. When the same item appears in two indexes, the metadata from the later fetch wins, and a `304` counts as a fetch at the moment it arrives. Because fetches don't overlap, a later fetch always reflects the server's later state. Overlapping fetches could finish out of order and let older metadata overwrite newer, and an opaque ETag can't say which of two indexes is newer.
-- **`kind`** is a hint for which app shows a slice (`music`, `video`, `mixed`). Items carry their own `kind`.
-- **`sharedFolders[].available`** is false when that shared folder is unavailable (§5). The slices stay listed; only the files under that folder go offline.
-- **`etag`** and **`filesEtag`** are the slice's current ETags for the full index and the file list (§5), so a client polling `/v1/server` can tell which slices changed without another request.
-- **Pairing mode:** an unpaired client gets the same response with `sharedFolders` and `slices` omitted.
+- **Each client chooses what it follows.** The server publishes everything under its shared folders. Each client chooses for itself which shared folders (or paths within them) to include, and stores that choice on the device, never on the server, so changing it on one device doesn't affect any other: everything on the living-room Apple TV, only `Music` on a phone with little storage. A client that copies files (MiniMoon on iOS) filters the file list (§5) itself and downloads only what's chosen.
+- **Never switch on its own, never lose data.** A device that follows a subset keeps following exactly what it chose: a shared folder added later doesn't join it without asking, because on a phone that could start a very large download. If a shared folder a device follows is no longer listed (removed in the desktop app), the device keeps its copy of that folder's files, shows them as offline, and asks what to do; it never switches to other folders by itself. Devices remember shared folders by `id`, so renaming one changes nothing for them.
+- **`sharedFolders[].available`** is false when that shared folder is unavailable (§5). Only the files under that folder go offline.
+- **`index`** holds the current ETags of the full index (`etag`) and of the file list (`filesEtag`) (§5), so a client polling `/v1/server` can tell whether anything changed without another request.
+- **Pairing mode:** an unpaired client gets the same response with `sharedFolders` and `index` omitted.
 
-## 5. Slice sync: the full index, with an ETag
+## 5. Library sync: the full index, with an ETag
 
-`GET /v1/slices/{sliceId}/index`, or `GET /v1/slices/{sliceId}/index?view=files` for the file list (below)
+`GET /v1/index`, or `GET /v1/index?view=files` for the file list (below)
 
-- **Response:** every item in the slice, and every folder needed to reach them, in one gzipped JSON response with an `ETag`:
+- **Response:** every item in every shared folder, and every folder needed to reach them, in one gzipped JSON response with an `ETag`. Hidden files and symlinks leading out of the shared folders (unless the user opted in) aren't listed (§9), nor are subfolders the user chose to publish without (below).
 
 ```json
 {
@@ -150,14 +140,15 @@ There is one household and no user accounts. Every client that can reach the ser
 
 - **`folders`:** every ancestor folder of every item, up to and including the shared folder itself, so a client can build the tree without gaps.
 - **`offline`:** the ids of shared folders that are currently unavailable. Their items are listed from the server's last good scan when it has one. After the index is rebuilt it has none, and the folder has no items in the response (see "No previous snapshot" below); the client rule for offline folders keeps the client's copy either way.
-- **Unchanged slice:** the client sends `If-None-Match: <etag>`; the server answers `304 Not Modified` with no body.
-- **ETag:** changes whenever anything in the slice's index changes: a file added, removed or changed, metadata re-read, a folder going offline or coming back, or the slice's definition being edited in the desktop app. Clients treat it as opaque.
+- **Unchanged index:** the client sends `If-None-Match: <etag>`; the server answers `304 Not Modified` with no body.
+- **ETag:** changes whenever anything in the index changes: a file added, removed or changed, metadata re-read, a folder going offline or coming back, or a shared folder being added, removed or renamed. Clients treat it as opaque.
   - **Weak, shared by both encodings.** The index is served gzipped or plain depending on `Accept-Encoding`, and RFC 9110 §8.8.3.3 requires a strong ETag to differ between the two. Index ETags are therefore weak (`W/"…"`), the same for both encodings, and index responses carry `Vary: Accept-Encoding`. `If-None-Match` compares weakly, so `304` works for either, and `/v1/server` advertises that one ETag.
   - **A hash of the contents, never a counter.** The server derives it from a hash of the index's contents. A counter could restart after an index rebuild and repeat an old value for different contents.
 - **Client update:**
   - **Apply all or nothing.** The client applies an index only after it has downloaded and parsed it completely, and applies it in one transaction. A truncated download or a parse error leaves the previous copy untouched.
-  - **Compare by item `id`,** scoped to the server's `id`. Items in the local copy but not in the index were removed, including files taken out of the slice. Items new in the index were added. The client's own state key (below) is used only to look up its on-device state, never to decide which files exist, so two files that share a state key stay two files.
-  - **Offline folders lose nothing.** For a shared folder listed in `offline`, the client adds and updates items from the response but never removes any. That holds whether the server sends its last snapshot or, after an index rebuild, no items for that folder at all. Removals under that folder, including files taken out of the slice, are applied once it's back online.
+  - **The device's choice filters first.** The client compares only the items under the shared folders or paths it chose (§4). Items it no longer follows are removed like any other.
+  - **Compare by item `id`,** scoped to the server's `id`. Items in the local copy but not in the index were removed. Items new in the index were added. The client's own state key (below) is used only to look up its on-device state, never to decide which files exist, so two files that share a state key stay two files.
+  - **Offline folders lose nothing.** For a shared folder listed in `offline`, the client adds and updates items from the response but never removes any. That holds whether the server sends its last snapshot or, after an index rebuild, no items for that folder at all. Removals under that folder are applied once it's back online.
   - **Metadata always comes from the newest index.** The client replaces every item's metadata (tags, audio, video facts) from each index it accepts, whether or not the file's size or mtime changed, so metadata corrected on the server reaches clients without any media being downloaded again.
   - **Media is downloaded again only when `size`, `mtime` or `rev` changed** (`rev` is defined in the wire schema below).
   - This is MiniMoon's iOS sync today (`SyncService.preparePlan`), plus the metadata rule. Run the comparison off the main actor: on a large library it once blocked the main actor for seconds (MINIMOON-B9).
@@ -178,17 +169,17 @@ There is one household and no user accounts. Every client that can reach the ser
 
   - **Each item** carries only the required `id`, `sharedFolderId`, `path`, `size`, `mtime` and `rev`, all as defined in the wire schema below. `size` is included because the iOS sync compares size as well as mtime (`SyncService.preparePlan`), and `rev` so that an in-place change the watcher caught with size and mtime unchanged still reaches the iOS app's copy. There are no folders, metadata or `kind`. A client builds folders from paths, and reads kinds and tags from the files it downloads.
   - **`offline`** is kept. A client must still not treat a missing shared folder's files as deleted.
-  - **Its own ETag (`filesEtag`).** The file list is a different representation from the full index, so it has its own ETag, weak and hashed like the full index's. That ETag changes only when the list changes: a file added, removed, moved, or changed in size, mtime or `rev`, a folder going offline or coming back, or the slice definition changing which files it covers. Metadata re-reads don't change it, so a server-side reader upgrade doesn't make the iOS app download the list again. `If-None-Match` and `304` work as for the full index.
+  - **Its own ETag (`filesEtag`).** The file list is a different representation from the full index, so it has its own ETag, weak and hashed like the full index's. That ETag changes only when the list changes: a file added, removed, moved, or changed in size, mtime or `rev`, a folder going offline or coming back, or a shared folder being added or removed. Metadata re-reads don't change it, so a server-side reader upgrade doesn't make the iOS app download the list again. `If-None-Match` and `304` work as for the full index.
   - **The client rules are the same,** apart from metadata: apply the list all-or-nothing, compare by item `id`, never remove offline folders' items, and redownload media when `size`, `mtime` or `rev` changed. The iOS app stores the `rev` it downloaded alongside size and mtime. The metadata rule doesn't apply, because the client reads metadata from its own copies of the files.
   - **Size (estimated):** about 180 bytes per item before gzip (the example above), roughly a quarter of a full audio item, so about 7 MB for 40,000 tracks, much less gzipped. That's comparable to the Sync server's `/files` listing the iOS app downloads today.
 - **No deltas, cursors or tombstones.** Removals, moves, folder deletes and files added then removed between syncs all fall out of the client's comparison. The server keeps no change history.
 - **Scans never publish a guess.** A removal reaches clients only when the server has positively seen that a file is gone:
-  - **Unavailable shared folders.** When a folder is added, the server records the identity of the volume it lives on (its device ID or volume UUID). Before every scan it checks that the folder exists, is readable, and is still on that volume. An unplugged drive or unmounted network volume usually leaves an empty mount point behind on the startup disk, so the volume check, not emptiness, is what detects it. If the check fails, the folder is marked `available: false`, its last snapshot keeps being served in slice indexes (listed in `offline`), and its files' content, art and lyrics answer `503 folder_unavailable`.
+  - **Unavailable shared folders.** When a folder is added, the server records the identity of the volume it lives on (its device ID or volume UUID). Before every scan it checks that the folder exists, is readable, and is still on that volume. An unplugged drive or unmounted network volume usually leaves an empty mount point behind on the startup disk, so the volume check, not emptiness, is what detects it. If the check fails, the folder is marked `available: false`, its last snapshot keeps being served in the index (listed in `offline`), and its files' content, art and lyrics answer `503 folder_unavailable`.
   - **A scan error publishes nothing.** A scan error means failing to list a folder or to read a file's size and modification date: a permission error, an I/O error, a volume dropping partway through. Failing to read a file's metadata is not a scan error; that file is still listed with its required fields (§8, reading metadata safely). If a scan error happens under a shared folder, the server keeps that folder's previous snapshot whole and retries on the next scan. After repeated failures the desktop app shows which subfolders can't be read and offers to publish without them. That's an explicit choice by the user, never a silent partial publish. (Keeping only the failed subfolders' previous contents is a possible refinement later; v1 keeps the whole folder.)
   - **A scan that completes is the truth,** including a folder that's really empty: if it completes without errors, its removals are published.
-  - **One step.** A completed scan replaces the folder's snapshot in a single database transaction, and slice ETags are computed after it. A client never sees half a scan.
+  - **One step.** A completed scan replaces the folder's snapshot in a single database transaction, and the index ETags are computed after it. A client never sees half a scan.
   - **No previous snapshot.** On the first scan of a newly added folder, or after the server's index has been rebuilt from scratch, the folder is published only once a scan completes without errors. Until then it's listed as unavailable, not partial, and listed in `offline` with no items. That matters after a rebuild, when clients still hold copies the server no longer knows about: the client rule for offline folders (above) keeps them. A rebuild loses only the index; shared folders, their UUIDs and volume identities live in the server's settings (§8), so they survive it.
-- **Slice removed or unpublished in the desktop app:** it drops out of `/v1/server`, and `/index` answers `404 not_found`. Clients handle it as in §4: keep their copy as offline and ask.
+- **Shared folder removed in the desktop app:** it drops out of `/v1/server` and its items drop out of the index. A device that followed it handles it as in §4: keep its copy as offline and ask.
 - **Size (estimated, not measured):** the example audio item below is about 650 bytes of JSON, so 40,000 tracks is roughly 25 MB, a few MB gzipped. A video item is somewhat larger because of its streams, but video libraries hold far fewer files. Parsing and comparing a 100,000-track library on an Apple TV should be measured before relying on it. If it proves too slow, a delta endpoint can be added later as an optional feature, since v1 changes are additive.
 
 **Wire schema**
@@ -291,12 +282,12 @@ There is one household and no user accounts. Every client that can reach the ser
     Matinee fills `ProbeResult` from the index and skips its own VLCKit probe. That probe costs a network parse of up to 10 seconds per share file today, repeated after every tvOS cache purge. Per-track language and default/forced flags, together with `trackNumber`, also let it apply audio and subtitle language preferences before playback.
   - **Unreadable files:** a file whose metadata can't be read is still listed and served, with only the required fields and `mime` (which comes from the extension). Matinee falls back to probing it with VLCKit as today.
 - **Identity:**
-  - **`id`** is a hash of the shared folder's `id` and the item's `path`. It survives server index rebuilds, is the same in every slice, and changes only when the file is moved or renamed on disk. Renaming a shared folder's display name changes nothing. Used in content, art and lyrics URLs.
+  - **`id`** is a hash of the shared folder's `id` and the item's `path`. It survives server index rebuilds and changes only when the file is moved or renamed on disk. Renaming a shared folder's display name changes nothing. Used in content, art and lyrics URLs.
   - **Clients key their on-device state by facts they already use, scoped to the server's `id`,** so two servers with the same paths never collide:
     - **MiniMoon:** (server `id`, shared folder `id`, `path`), its path identity today with the folder and server added. A file moved on disk loses its state, as today.
     - **Matinee:** (server `id`, `name` + `size`), the key it already gives share files (`ShareKeys.ownKey`), so its existing share machinery applies. A file moved to another folder keeps its state; a renamed one doesn't. Two different files with the same name and size share state; that's Matinee's existing trade-off for share files, accepted rather than fixed. They're still two catalog entries, because which files exist is decided by item `id` (§5, client update).
   - **No content fingerprint in v1.** A hash over the start of a file changes whenever a music file is retagged, because ID3 and FLAC tags sit at the front. Neither app needs one for server files. It can return as an optional feature if deduplication ever needs it.
-- **Push:** with the `events` feature, `GET /v1/events` is a Server-Sent Events stream sending `slice-changed {sliceId, etag, filesEtag}`, `folder-availability {sharedFolderId, available}`, and `slices-changed` when a slice is added, removed, renamed, published or unpublished. Events are hints only. Clients act on them by re-checking `/v1/server` and `/index` with `If-None-Match`, and do the same after every reconnect, because events sent while disconnected are lost. Clients that don't use events re-check when they come to the foreground.
+- **Push:** with the `events` feature, `GET /v1/events` is a Server-Sent Events stream sending `index-changed {etag, filesEtag}`, `folder-availability {sharedFolderId, available}`, and `shared-folders-changed` when a shared folder is added, removed or renamed. A client that falls behind the stream gets `shared-folders-changed`. Events are hints only. Clients act on them by re-checking `/v1/server` and `/v1/index` with `If-None-Match`, and do the same after every reconnect, because events sent while disconnected are lost. Clients that don't use events re-check when they come to the foreground.
 
 ## 6. Content, artwork, lyrics
 
@@ -332,122 +323,13 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 
 ## 8. Server behaviour
 
-- **Shared folders and slices:**
+- **Shared folders:**
   - **Shared folders** are the folders on disk the user shares, added in the desktop app or with CLI flags. The Sync app has one today; MMP allows several. They're merged into one tree, each as a top-level folder.
-  - **Identity versus label.** Each shared folder gets a permanent UUID when it's added. Identity (§5), selections and availability all use that UUID. Its display name defaults to the folder's name on disk; a clash gets a number added (`Music 2`). The user can rename it freely, since renaming changes only the label.
-  - **Slices** are named subsets of that tree. In v1 every slice is a selection, edited in a file-selection tree that shows every shared folder at the top and works at any depth, as the Sync app's tree already does. There is no "active" slice.
-  - **Published.** Each slice has a "published" switch in the desktop app. Only published slices are listed in `/v1/server` and served. A slice can be prepared before devices see it, and old presets don't appear on every device after migration.
-  - **Selections** pick whole folders, with everything under them, and single files, at any depth. A whole shared folder is selected by selecting its top-level folder.
-  - **Companion files.** Selecting a single file also selects its companions, and the selection UI shows them (e.g. "+2 subtitle files"), so nothing is broadened silently. Only three kinds of file can be companions, matched by extension, case-insensitively:
-    - **Subtitles** (`srt`, `ass`, `ssa`, `vtt`, `sup`, and `idx` with `sub`), whose name is the selected file's stem plus any further `.`-separated parts: `Movie.srt`, `Movie.en.forced.srt`, `Movie.idx` with `Movie.sub` for `Movie.mkv`.
-    - **Lyrics** (`lrc`), named the same way: `song.lrc` for `song.flac`.
-    - **The folder's cover image:** `cover`, `folder` or `front` with `jpg`, `jpeg`, `png` or `webp`, whenever any file in that folder is selected.
-    - **Rules:**
-      - Companions are looked for only in the selected file's own folder, never in subfolders, and only for files the user selected directly; a companion's own companions aren't added.
-      - Any other file sharing the stem, such as `Movie.notes.txt`, `Movie.backup.zip` or `Movie.original.mkv`, is not a companion.
-      - A selection is evaluated at every scan, so a companion added later (subtitles downloaded after the movie, say) is published automatically.
-    Selecting a whole folder already includes all of these and everything else in it.
-  - **`kind`** is chosen per slice in the desktop app, defaulting to the kind most of its files are.
-- **Slice definitions (server persistence, not part of the wire protocol).** Slices are stored in the server's settings, not in the Sync app's web storage (`localStorage`, in `state.ts`), because the server keeps running when the window is closed and the CLI needs them too. Clients never see this format.
-  - **A typed syntax tree, not a query language.** A definition is a tree of typed nodes, and each node type has a fixed set of typed fields:
-    - properties are named by closed enums, never by strings like `"tags.genre"`;
-    - comparisons are typed per kind of value, never by operator strings;
-    - paths are a shared folder UUID plus an array of components, never strings with separators or trailing-slash conventions.
-    Nothing in the format is parsed out of a string, and the desktop app's editors build the tree directly.
-  - **Normative definition** (Rust, as the server would declare it; JSON is its serde serialization, with node types tagged by `"type"` and names in camelCase):
-
-```rust
-struct SliceFile { format_version: u32, slices: Vec<Slice> }
-
-struct Slice {
-    id: Uuid,                 // created with the slice, never reused; the protocol's slice id
-    name: String,
-    kind: SliceKind,          // Music | Video | Mixed: the hint in /v1/server
-    published: bool,
-    definition: SliceExpr,
-}
-
-/// A path in the unified tree: a shared folder plus components within it.
-struct TreePath { folder: Uuid, path: Vec<String> }
-
-enum SliceExpr {
-    // v1
-    All,                                                 // every file in every shared folder
-    Selection { folders: Vec<TreePath>, files: Vec<TreePath> },  // files bring their companions
-
-    // reserved for rule-based slices; not implemented in v1
-    And { children: Vec<SliceExpr> },
-    Or { children: Vec<SliceExpr> },
-    Not { child: Box<SliceExpr> },
-    Text { field: TextField, test: TextTest, case_sensitive: bool },
-    Number { field: NumberField, test: NumberTest },
-    Date { field: DateField, test: DateTest },
-    Flag { field: FlagField, value: bool },
-    Kind { kinds: Vec<ItemKind> },                       // Audio | Video | Image | ...
-    Transfer { values: Vec<Transfer> },                  // Sdr | Pq | Hlg
-    Limit { child: Box<SliceExpr>, sort: SortKey, order: Order, count: u32 },
-}
-
-enum TextField   { Title, Artist, AlbumArtist, Album, Genre, Work, FileName }
-enum NumberField { Year, TrackNumber, DiskNumber, DurationMs, SampleRate, BitDepth,
-                   Channels, Width, Height, SizeBytes }
-enum DateField   { Modified }
-enum FlagField   { Compilation, HasLyrics, HasEmbeddedArt, DolbyVision, Hdr10Plus }
-
-enum TextTest   { Is { value: String }, Contains { value: String },
-                  StartsWith { value: String } }
-enum NumberTest { Equals { value: i64 }, LessThan { value: i64 },
-                  GreaterThan { value: i64 }, Between { min: i64, max: i64 } }
-enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { days: u32 } }
-```
-
-  - **v1 files:**
-
-```json
-{
-  "formatVersion": 1,
-  "slices": [
-    {"id": "6b0e…", "name": "Everything", "kind": "mixed", "published": true,
-     "definition": {"type": "all"}},
-    {"id": "2f9a…", "name": "Road Trip", "kind": "music", "published": true,
-     "definition": {"type": "selection",
-                    "folders": [{"folder": "a41f…", "path": ["Jazz"]},
-                                {"folder": "a41f…", "path": ["Rock", "Classics"]}],
-                    "files": [{"folder": "a41f…", "path": ["Misc", "song.flac"]}]}}
-  ]
-}
-```
-
-  - **A later rule-based definition** (illustrative; not v1): jazz from the 1950s and 60s in the Music folder:
-
-```json
-{"type": "and", "children": [
-  {"type": "selection", "folders": [{"folder": "a41f…", "path": []}], "files": []},
-  {"type": "text", "field": "genre", "test": {"type": "contains", "value": "Jazz"}, "caseSensitive": false},
-  {"type": "number", "field": "year", "test": {"type": "between", "min": 1950, "max": 1969}}
-]}
-```
-
-  - **Fields map to index facts, one each.** Every field variant names exactly one fact from §5:
-    - `Genre` is the audio tag `genre`;
-    - `Width` is the first video stream's width;
-    - `Modified` is `mtime`.
-    That mapping lives in the server's code, not in the file. A file whose fact is missing doesn't match a test on it.
-  - **Extending** means adding variants: new node types, fields or tests. That doesn't change `formatVersion`, which only changes if an existing type's meaning changes.
-  - **Strict parsing, fail closed, never vanish.**
-    - **Each slice is parsed on its own.** Its `id`, `name`, `kind` and `published` are always read; its `definition` is parsed strictly, rejecting unknown variants and unknown fields.
-    - **A definition that doesn't parse** (made by a newer server, say) means the slice is listed with `available: false` and serves nothing (§4). It's never published with a guess, and it never silently disappears, which clients would read as deletion.
-    - **In the desktop app** such a slice shows read-only as needing a newer version.
-    - **Writing back.** The server stores the slice verbatim and writes back only the slices it parsed, so an older server never drops or alters a newer one's definitions.
-    - **A newer `formatVersion`** makes every slice in the file unavailable in the same way.
-  - **Evaluation** happens on the server against its index. A slice's membership, and so its ETag, changes when its definition changes or when a file's facts change; for a future rule slice that includes a retag that moves a song in or out. Clients never see definitions, only `/v1/server` entries and indexes, so new node types need no client change.
-  - **Migration from the Sync app.** On first launch after the upgrade, the app hands its existing presets to the server, which converts each to a slice:
-    - **Paths.** The Sync app stores a preset as path strings in which a trailing `/` marks a folder. The migration is the one place that convention is read: entries ending in `/` become `folders`, the rest `files`, each split into components under the shared folder's UUID (`Jazz/` becomes `{"folder": "a41f…", "path": ["Jazz"]}`).
-    - **Empty presets.** A preset with an empty selection becomes `all`, which also covers any folder shared later.
-    - **Only the active preset is published.** The other presets are migrated unpublished, and the desktop app shows them as migrated, so the user decides which ones devices should see. Before the upgrade only the active preset was listed to devices. (Raw downloads from the Sync server already ignored the selection, so this is about what's listed, not new file access.)
-- **Enforcement:** an item is served (`/content`, `/art`, `/lyrics`, signed URLs) only if it's in at least one published, available slice; otherwise it gets `404`, as if it didn't exist. Item routes aren't scoped by slice, because every client can see every published slice. Slices are enforced by the server on every route, not only in listings.
+  - **Identity versus label.** Each shared folder gets a permanent UUID when it's added. Identity (§5), clients' choices (§4) and availability all use that UUID. Its display name defaults to the folder's name on disk; a clash gets a number added (`Music 2`). The user can rename it freely, since renaming changes only the label.
+  - **No server-side selections.** The Sync app's file-selection tree and presets aren't carried over. What each device shows or copies is chosen on that device (§4); the server publishes everything under its shared folders.
+- **Enforcement:** an item is served (`/content`, `/art`, `/lyrics`, signed URLs) only if it's in the index: inside a shared folder and not filtered out (§9). Anything else, including an item that has since been removed, gets `404`, as if it didn't exist. Enforced by the server on every route, not only in listings.
 - **Index:**
-  - **Contents:** a SQLite database in the app's data directory, holding files, folders, their metadata, and each shared folder's last snapshot. Each file is indexed once, however many slices include it.
+  - **Contents:** a SQLite database in the app's data directory, holding files, folders, their metadata, and each shared folder's last snapshot.
   - **Reader version and read status:** each indexed file records the version of the metadata reader that read it, and how the read went:
     - **read:** metadata extracted;
     - **failed temporarily:** a timeout or I/O error, which may succeed later;
@@ -455,11 +337,10 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - **Settings, not index:** everything that can't be rebuilt from the disks lives in the server's settings, so rebuilding the index from scratch never changes an identity:
     - the server's `id`;
     - the shared folders: UUID, path on disk, display name and volume identity;
-    - slice definitions, which refer to shared folders by UUID;
     - each file's bumped `rev` and the counter they're drawn from (§5), and the watcher's last FSEvents event id on macOS;
     - when pairing is on, paired devices and the URL-signing key.
   - **Why it exists:** so metadata isn't re-read on every request; the Sync server's `/files` walks the whole tree on every call.
-  - **Ready responses:** the server may also keep each slice's gzipped index response ready, rebuilt when the slice changes.
+  - **Ready responses:** the server keeps the index and the file list ready, each gzipped on first use, and rebuilds them when the index changes.
 - **Change detection:**
   - **Triggers:** file-system watching, plus a full rescan at startup and periodically. The watcher subscribes to file-level events (on macOS, an FSEvents stream with `FileEvents`), because detecting in-place writes (§5, `rev`) needs to know which file was written, not only which folder changed.
   - **Re-reading metadata:**
@@ -484,27 +365,27 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - **Grace period:** the assertion is kept for a grace period after the last request, because players buffer ahead and can go quiet for a while in the middle of playback. Its length needs tuning against real buffered playback in VLCKit and AVPlayer.
   - **Optional setting:** "Keep this computer awake while sharing".
   - **Clients** show a distinct "server asleep or off" state and keep browsing from their local copy.
-- **Network visibility:** the desktop app shows "Sharing on ‹network›" and has a one-click pause, because in open mode a laptop shares its slices with any network it joins (§9).
+- **Network visibility:** the desktop app shows "Sharing on ‹network›" and has a one-click pause, because in open mode a laptop shares its folders with any network it joins (§9).
 
 ## 9. Security in v1, and what's deferred
 
-- **Open in 1.0.** Anyone on the same network can read the published slices. That's the same exposure as today's Sync server, which has no auth.
-  - **The real risk is a laptop that moves:** with the server running, a MacBook on hotel or café Wi-Fi advertises itself and serves its slices to everyone there.
+- **Open in 1.0.** Anyone on the same network can read everything under the shared folders. That's the same exposure as today's Sync server, which has no auth.
+  - **The real risk is a laptop that moves:** with the server running, a MacBook on hotel or café Wi-Fi advertises itself and serves its shared folders to everyone there.
   - **1.0 mitigation:** the network name, and the pause control (§8).
   - **1.1:** the optional pairing code (§4).
   - **Possible later:** remember the network chosen at setup and pause sharing on any other. Reading the Wi-Fi name on recent macOS may need Location permission (from memory, not checked).
-- **Slices are not access control.** They decide what's published, not who can see it: every client can see every published slice. A "Kids" slice hides nothing from any other device. Files outside every published slice are never served.
+- **A device's choice is not access control.** Which shared folders a device follows is decided and stored on that device; the server never sees it, and every client can read everything under the shared folders. Leaving a folder off a child's iPad doesn't stop that iPad, or any other device, from reading it. Files outside the shared folders are never served.
 - **Nothing to damage.** Because no route writes, an unwanted client can read the published files but can't change, delete or add anything, or alter another device's state.
 - **Pairing mode (1.1):** a code shown on the server proves consent; every API call and media URL is authenticated, and revoking a device makes its next request fail and closes its open downloads (§4).
 - **Plain HTTP.** Media, and in pairing mode the token, can be sniffed by anyone on the same LAN.
   - **Why plain:** TLS with a self-signed, pinned certificate works in URLSession through its challenge delegate, but it's unverified for VLCKit's HTTP access and for AVPlayer without a resource loader.
   - **Later:** a `tls` feature with the certificate fingerprint pinned at pairing, once VLCKit's behaviour is tested.
-- **Inside chosen folders and published slices only.** The server never exposes paths outside the shared folders or outside every published slice, filters hidden files, rejects path traversal, and never follows symlinks out of the shared folders unless the user opts in. This matters more in open mode. The Sync server's `/file` route skips some of these filters, so it's not a model to copy.
+- **Inside shared folders only.** The server never exposes paths outside the shared folders, filters hidden files, rejects path traversal, and never follows symlinks out of the shared folders unless the user opts in. This matters more in open mode. The Sync server's `/file` route skips some of these filters, so it's not a model to copy.
 
 ## 10. Smallest first version
 
-**Where the server stands (2026-11-14).** Steps 2–5, 7 and 8 below are built, and so is the server side of protocol 1.1 (pairing, signed URLs, `events`, `art-resize`):
-- **Not done:** step 1, the playback test, needs Matinee and MiniMoon builds that speak MMP. Step 6 belongs to the desktop app (`minimoon-sync`), which still embeds the old server: the server exposes what that UI needs (shared folders, slices, companion previews, preset migration, pausing, pairing and devices, error counts, "Reindex everything") but nothing calls it yet.
+**Where the server stands (2026-11-15).** Steps 2–5, 7 and 8 below are built, and so is the server side of protocol 1.1 (pairing, signed URLs, `events`, `art-resize`):
+- **Not done:** step 1, the playback test, needs Matinee and MiniMoon builds that speak MMP. Step 6 belongs to the desktop app (`minimoon-sync`), which still embeds the old server: the server exposes what that UI needs (shared folders, excluded subfolders, pausing, pairing and devices, error counts, "Reindex everything") but nothing calls it yet.
 - **Tested:** on macOS only. The Windows code paths were type-checked, and the Linux ones through an Android target that shares them; neither was built or run on its own platform.
 - **Additions beyond the steps:** the ctime check on `rev` bumps (§5), and an idle-sleep assertion while content streams (§8).
 
@@ -518,16 +399,14 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
      - shared folders (UUIDs, paths, names, volume identities), bumped `rev` values and their counter in the server's settings, and a SQLite index of files and metadata, with reader versions and read status;
      - a file-level watcher that bumps `rev` on in-place writes (§5), resuming from its last event id on macOS. The `notify` crate (8.2.2) covers Linux (inotify, with a watch per directory and `IN_Q_OVERFLOW` reported as a rescan) and Windows. Its FSEvents backend always starts from "now" and doesn't expose event ids, so replay after a restart on macOS needs the server's own FSEvents stream, or a patch to `notify` that exposes the starting id;
      - the scan-safety rules in §5: the volume check, nothing published after a scan error, one-step publication, no partial first publish;
-     - `/index` with weak ETags and `304`, in both views (`full` and `files`), each with its own ETag.
+     - `/v1/index` with weak ETags and `304`, in both views (`full` and `files`), each with its own ETag.
      This is the largest server piece.
   5. `/content` (from step 1), `/art` and `/lyrics`.
   6. **Desktop app UI:**
      - shared folders and their display names;
-     - slices, using the existing selection tree spanning every shared folder, with companion files shown, and without the active-preset switch;
-     - a published switch per slice;
      - the sharing network and a pause control;
      - read-error and metadata-error reporting, and "Reindex everything".
-     Slices are stored in the server's settings in the format in §8 (`all` and `selection` only), migrating existing presets with only the active one published.
+     The Sync app's selection tree and presets go away; choosing files moves to each device (§4).
   7. **Tag reading, copied in.** Copy the reading side of `minimoon_tags` into the server (§8), and extend the copy with duration in milliseconds (the crate reports whole seconds, `properties.duration().as_secs()`) and a channel count. The apps' crate doesn't change.
   8. **Video reading in native Rust**, chosen by the reader test ([video-reader-test.md](video-reader-test.md), 2026-11-14):
      - **Crates:** `matroska-demuxer`, `mp4-atom`, `scuffle-h265`, `h264-reader`, `scuffle-av1`, and `lofty` for MP4 tags.
@@ -537,17 +416,16 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
      - **Placement:** in the server, next to the copied tag reader.
 - **Shared Swift client package:** used by both MiniMoon and Matinee, as a new Swift package with its own repo, since Matinee and MiniMoon are separate repos. It covers:
   - discovery (`NWBrowser`);
-  - the per-device slice picker, with the choice stored on the device by slice `id`;
-  - keeping one accepted index per followed slice and showing their union;
-  - fetching `/index` in either view with `If-None-Match`, one fetch at a time per server, and applying it all-or-nothing in one transaction, off the main actor;
+  - the per-device choice of shared folders (or paths), stored on the device by shared folder `id`;
+  - fetching `/v1/index` in either view with `If-None-Match`, and applying it all-or-nothing in one transaction, off the main actor;
   - comparing by item `id`, with app state keys kept for state lookups only;
   - the metadata rule;
-  - offline folders (never removing their items) and unavailable or disappeared slices, shown as offline, never as deleted;
+  - offline folders (never removing their items) and removed shared folders the device followed, shown as offline, never as deleted;
   - content URLs with resumable downloads checked against `Content-Range`, and an error mapping.
 - **MiniMoon:**
-  - **iOS (copies files):** syncs from the file list (`?view=files`). It downloads added and changed files and rescans them locally, as it does today against `/files`. This replaces its Sync-protocol client for MMP servers, with offline folders, resumable downloads and per-device slices added.
+  - **iOS (copies files):** syncs from the file list (`?view=files`). It filters the list to the shared folders chosen on the device, downloads added and changed files and rescans them locally, as it does today against `/files`. This replaces its Sync-protocol client for MMP servers, with offline folders, resumable downloads and the per-device choice added.
   - **macOS and tvOS (no local copy):** an MMP `LibrarySource` mapping items from the full index to `Track` rows, plus fetch-to-cache playback.
-  - **Switching slice** on a device removes the files that are no longer in it from that device, through the normal comparison.
+  - **Changing the choice** on a device removes the files no longer chosen from that device, through the normal comparison.
 - **Matinee:** an MMP source feeding `LibraryStore` the way a share does, filling `ProbeResult` from each item's `video` facts instead of probing, and matching streams to VLCKit tracks by `trackNumber`. It plays content URLs through VLCKit. Its existing share machinery (record keys, the state-worth-keeping rule, offline state, the title cap) applies.
 
 **Next (protocol 1.1, already designed above; the server side is built)**
@@ -601,7 +479,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
   - The `rev` counter, ids and `rev` values survive a restart and an index rebuild. A folder on an unmounted volume keeps serving its last snapshot and is listed in `offline`. A scan error publishes nothing until the user excludes the unreadable subfolder.
   - The copied tag reader on crates.io `lofty` 0.25.5 read 1,011 sample files (MP3, WAV, M4A, AIFF, FLAC, MPC, APE, Ogg, WavPack, Opus, Speex) identically to the apps' crate on its pinned revision.
   - ID3 `POPM` ratings and unsynced lyrics (ID3 `USLT`, Vorbis `UNSYNCEDLYRICS`) were gaps in the apps' reader, which the copy matched: `lofty` presents `POPM` as `email|stars|counter` text, and maps unsynced lyrics to `ItemKey::UnsyncLyrics`, which the reader didn't look at. The apps' reader now reads both, and the copy (reader version 2) has the same change, checked by the apps' tests for it on MP3, WAV and FLAC files. The 1,011-file comparison above predates that change.
-  - A first scan of 29,722 local files (107 videos and Logic Pro's sample library) took about 5 seconds. That slice's index is 13.4 MB, 1.1 MB gzipped.
+  - A first scan of 29,722 local files (107 videos and Logic Pro's sample library) took about 5 seconds. Its index is 13.4 MB, 1.1 MB gzipped.
 - **Apple and competitors:**
   - **Local network privacy:** tvOS doesn't have it (TN3179).
   - **Plex:** remote playback of personal video needs Plex Pass or a Remote Watch Pass since April 2025, enforced in stages. Local playback is unaffected.
@@ -613,7 +491,7 @@ enum DateTest   { Before { at_ms: i64 }, After { at_ms: i64 }, WithinLastDays { 
 **Unverified**
 
 - Whether Jellyfin or OpenSubsonic have a change feed.
-- What users actually use Sync app presets for. Publishing only the active preset at migration keeps today's listing; anyone who switched presets to change what every device sees now does that per device instead.
+- What users actually use Sync app presets for. Presets aren't migrated; anyone who switched presets to change what every device sees now chooses per device instead.
 - Index size and the time to parse and compare it on an Apple TV for a 100,000-track library (only estimated).
 - VLCKit and AVPlayer playback, seeking and recovery against this server's HTTP contract (the first step in §10), including whether either sends `If-Range` or checks the ETag across range requests.
 - Whether mtime checks see in-place changes promptly on network volumes the host mounts.

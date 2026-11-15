@@ -20,7 +20,6 @@ use crate::published::{self, FolderView, ItemCache, Published};
 use crate::reader::{self, file_type, reader_version, Reader};
 use crate::scan::{self, ScanError, ScanOptions, ScanResult};
 use crate::settings::{Settings, SharedFolderSettings};
-use crate::slices::{self, Slice, SliceExpr, SliceFile, SliceKind, SyncPreset};
 use crate::volume::{self, VolumeIdentity};
 use crate::watch::{Batch, WatchEvent, Watcher};
 use anyhow::{bail, Context, Result};
@@ -55,7 +54,7 @@ const EVENT_ID_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 /// How the library runs.
 #[derive(Clone, Debug)]
 pub struct LibraryOptions {
-    /// The server's data directory: settings, slices, the index and caches.
+    /// The server's data directory: settings, the index and caches.
     pub data_dir: PathBuf,
     pub scan: ScanOptions,
     /// A metadata read taking longer than this counts as a temporary failure.
@@ -84,17 +83,14 @@ impl LibraryOptions {
 /// A change clients may want to hear about (the `events` feature, spec §5 "Push").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerEvent {
-    SliceChanged {
-        slice_id: Uuid,
-        etag: String,
-        files_etag: String,
-    },
+    /// The index changed: its new ETags for the full index and the file list.
+    IndexChanged { etag: String, files_etag: String },
     FolderAvailability {
         shared_folder_id: Uuid,
         available: bool,
     },
-    /// A slice was added, removed, renamed, published or unpublished.
-    SlicesChanged,
+    /// A shared folder was added, removed or renamed.
+    SharedFoldersChanged,
 }
 
 /// When the watcher last reported a write to each file, for the mid-transfer check (spec §6).
@@ -172,18 +168,6 @@ pub enum IndexActivity {
 
 /// The reason a folder that has never been indexed is unavailable, when its volume is fine.
 pub const NOT_INDEXED_YET: &str = "not scanned yet";
-
-/// A slice, for the desktop app.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SliceInfo {
-    pub id: Uuid,
-    pub name: String,
-    pub kind: String,
-    pub published: bool,
-    /// The definition, or `None` when it needs a newer server (read-only).
-    pub definition: Option<SliceExpr>,
-    pub error: Option<String>,
-}
 
 enum Msg {
     Watch(Batch),
@@ -376,7 +360,6 @@ fn now_ms() -> i64 {
 struct Core {
     options: LibraryOptions,
     settings: Settings,
-    slices: SliceFile,
     store: IndexStore,
     folders: HashMap<Uuid, FolderState>,
     cache: ItemCache,
@@ -1159,7 +1142,7 @@ impl Core {
                 }
             })
             .collect();
-        let new = published::build(&self.settings, &self.slices, &views, &mut self.cache);
+        let new = published::build(&self.settings, &views, &mut self.cache);
         swap_and_announce(&self.published, &self.events, new);
     }
 
@@ -1281,27 +1264,19 @@ fn changes_between(old: &Published, new: &Published) -> Vec<ServerEvent> {
         }
     }
     let listing = |p: &Published| {
-        p.slices
+        p.folders
             .iter()
-            .map(|s| (s.id, s.name.clone(), s.kind.clone(), s.index.is_some()))
+            .map(|f| (f.id, f.name.clone()))
             .collect::<Vec<_>>()
     };
     if listing(old) != listing(new) {
-        events.push(ServerEvent::SlicesChanged);
+        events.push(ServerEvent::SharedFoldersChanged);
     }
-    for slice in new.slices.iter() {
-        let Some(index) = &slice.index else { continue };
-        let old_index = old.slice(slice.id).and_then(|s| s.index.clone());
-        let changed = old_index.is_none_or(|old| {
-            old.full.etag != index.full.etag || old.files.etag != index.files.etag
+    if old.index.full.etag != new.index.full.etag || old.index.files.etag != new.index.files.etag {
+        events.push(ServerEvent::IndexChanged {
+            etag: new.index.full.etag.clone(),
+            files_etag: new.index.files.etag.clone(),
         });
-        if changed {
-            events.push(ServerEvent::SliceChanged {
-                slice_id: slice.id,
-                etag: index.full.etag.clone(),
-                files_etag: index.files.etag.clone(),
-            });
-        }
     }
     events
 }
@@ -1318,13 +1293,12 @@ pub struct Library {
 }
 
 impl Library {
-    /// Loads the settings, slices and index, publishes the last snapshots, and starts scanning
+    /// Loads the settings and index, publishes the last snapshots, and starts scanning
     /// and watching.
     pub fn start(options: LibraryOptions) -> Result<Self> {
         std::fs::create_dir_all(&options.data_dir)
             .with_context(|| format!("can't create {}", options.data_dir.display()))?;
         let settings = Settings::load_or_create(&options.data_dir)?;
-        let slices = SliceFile::load(&options.data_dir)?;
         let store = IndexStore::open(&options.data_dir.join("index.sqlite"))?;
         let mut snapshots = store.load()?;
         let (tx, rx) = mpsc::channel();
@@ -1348,7 +1322,6 @@ impl Library {
         let mut core = Core {
             options,
             settings,
-            slices,
             store,
             folders,
             cache: ItemCache::default(),
@@ -1509,7 +1482,7 @@ impl Library {
         Ok(id)
     }
 
-    /// Stops sharing a folder. Its files leave every slice.
+    /// Stops sharing a folder. Its files leave the index.
     pub fn remove_shared_folder(&self, id: Uuid) -> Result<()> {
         let mut core = self.lock();
         let before = core.settings.shared_folders.len();
@@ -1607,146 +1580,6 @@ impl Library {
         Ok(())
     }
 
-    /// The companion files selecting a file would bring along, for the selection UI.
-    pub fn companions(&self, folder: Uuid, path: &str) -> Vec<String> {
-        let core = self.lock();
-        let Some(snapshot) = core.folders.get(&folder).and_then(|s| s.snapshot.as_ref()) else {
-            return Vec::new();
-        };
-        let (dir, name) = slices::split_path(path);
-        let prefix = if dir.is_empty() {
-            String::new()
-        } else {
-            format!("{dir}/")
-        };
-        snapshot
-            .range(prefix.clone()..)
-            .take_while(|(candidate, _)| candidate.starts_with(&prefix))
-            .filter_map(|(candidate, _)| {
-                let rest = &candidate[prefix.len()..];
-                (!rest.contains('/') && slices::is_companion(name, rest)).then(|| candidate.clone())
-            })
-            .collect()
-    }
-
-    // MARK: Slices
-
-    pub fn slices(&self) -> Vec<SliceInfo> {
-        self.lock()
-            .slices
-            .slices
-            .iter()
-            .map(|entry| SliceInfo {
-                id: entry.id,
-                name: entry.name.clone(),
-                kind: entry.kind.clone(),
-                published: entry.published,
-                definition: entry.parsed.as_ref().ok().map(|s| s.definition.clone()),
-                error: entry.parsed.as_ref().err().cloned(),
-            })
-            .collect()
-    }
-
-    fn save_slices(core: &mut Core) -> Result<()> {
-        core.slices.save(&core.options.data_dir)?;
-        core.publish_due = true;
-        Ok(())
-    }
-
-    /// Creates a slice. Without a `kind`, it's the kind most of its files are.
-    pub fn create_slice(
-        &self,
-        name: &str,
-        kind: Option<SliceKind>,
-        definition: SliceExpr,
-        published: bool,
-    ) -> Result<Uuid> {
-        let name = name.trim();
-        anyhow::ensure!(!name.is_empty(), "a slice needs a name");
-        let mut core = self.lock();
-        let kind = kind.unwrap_or_else(|| majority_kind(&core, &definition));
-        let slice = Slice {
-            id: Uuid::new_v4(),
-            name: name.to_string(),
-            kind,
-            published,
-            definition,
-        };
-        let id = slice.id;
-        core.slices.upsert(slice)?;
-        Self::save_slices(&mut core)?;
-        drop(core);
-        self.kick();
-        Ok(id)
-    }
-
-    /// Replaces a slice this server understands.
-    pub fn update_slice(&self, slice: Slice) -> Result<()> {
-        let mut core = self.lock();
-        anyhow::ensure!(core.slices.get(slice.id).is_some(), "no slice {}", slice.id);
-        core.slices.upsert(slice)?;
-        Self::save_slices(&mut core)?;
-        drop(core);
-        self.kick();
-        Ok(())
-    }
-
-    pub fn set_slice_published(&self, id: Uuid, published: bool) -> Result<()> {
-        let mut core = self.lock();
-        let entry = core
-            .slices
-            .get(id)
-            .with_context(|| format!("no slice {id}"))?;
-        let mut slice = entry
-            .parsed
-            .clone()
-            .map_err(|_| anyhow::anyhow!("this slice needs a newer version of the server"))?;
-        slice.published = published;
-        core.slices.upsert(slice)?;
-        Self::save_slices(&mut core)?;
-        drop(core);
-        self.kick();
-        Ok(())
-    }
-
-    pub fn delete_slice(&self, id: Uuid) -> Result<()> {
-        let mut core = self.lock();
-        anyhow::ensure!(core.slices.remove(id)?, "no slice {id}");
-        Self::save_slices(&mut core)?;
-        drop(core);
-        self.kick();
-        Ok(())
-    }
-
-    /// Creates the "Everything" slice when there are no slices at all, so a fresh install
-    /// publishes the whole tree.
-    pub fn ensure_default_slice(&self) -> Result<()> {
-        if !self.lock().slices.slices.is_empty() {
-            return Ok(());
-        }
-        self.create_slice("Everything", Some(SliceKind::Mixed), SliceExpr::All, true)?;
-        Ok(())
-    }
-
-    /// Converts the Sync app's presets into slices under a shared folder (spec §8).
-    pub fn migrate_presets(&self, folder: Uuid, presets: &[SyncPreset]) -> Result<Vec<Uuid>> {
-        let mut core = self.lock();
-        anyhow::ensure!(
-            core.settings.folder(folder).is_some(),
-            "no shared folder {folder}"
-        );
-        let mut ids = Vec::new();
-        for mut slice in slices::migrate_presets(folder, presets) {
-            slice.kind = majority_kind(&core, &slice.definition);
-            ids.push(slice.id);
-            core.slices.upsert(slice)?;
-        }
-        Self::save_slices(&mut core)?;
-        drop(core);
-        self.kick();
-        Ok(ids)
-    }
-
     /// Whether no scan is running or due and nothing is being read. A folder whose last scan
     /// failed and whose next scan is only the delayed retry counts as settled: the caller needs
     /// to hear about the errors now.
@@ -1792,36 +1625,6 @@ impl Library {
 impl Drop for Library {
     fn drop(&mut self) {
         self.shutdown();
-    }
-}
-
-fn majority_kind(core: &Core, definition: &SliceExpr) -> SliceKind {
-    let (mut audio, mut video) = (0usize, 0usize);
-    for folder in &core.settings.shared_folders {
-        let Some(snapshot) = core
-            .folders
-            .get(&folder.id)
-            .and_then(|s| s.snapshot.as_ref())
-        else {
-            continue;
-        };
-        let paths: Vec<&str> = snapshot.keys().map(String::as_str).collect();
-        for path in slices::evaluate(definition, folder.id, &paths) {
-            match file_type(scan::split_name(path)).kind {
-                reader::ItemKind::Audio => audio += 1,
-                reader::ItemKind::Video => video += 1,
-                _ => {}
-            }
-        }
-    }
-    if audio + video == 0 {
-        SliceKind::Mixed
-    } else if audio * 10 >= (audio + video) * 9 {
-        SliceKind::Music
-    } else if video * 10 >= (audio + video) * 9 {
-        SliceKind::Video
-    } else {
-        SliceKind::Mixed
     }
 }
 
@@ -1875,7 +1678,7 @@ fn drive(core: Arc<Mutex<Core>>, rx: Receiver<Msg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::published::PublishedSlice;
+    use crate::published::PublishedFolder;
 
     /// While a route holds the current view, no event announcing the next one may go out:
     /// the client hearing it would still be served the old ETag.
@@ -1885,11 +1688,12 @@ mod tests {
         let published = Arc::new(RwLock::new(Arc::new(Published::empty(&settings))));
         let (events, mut receiver) = broadcast::channel(16);
         let mut next = Published::empty(&settings);
-        next.slices = Arc::new(vec![PublishedSlice {
-            id: Uuid::new_v4(),
+        let folder = Uuid::new_v4();
+        next.folders = Arc::new(vec![PublishedFolder {
+            id: folder,
             name: "New".into(),
-            kind: "mixed".into(),
-            index: None,
+            available: false,
+            root: PathBuf::from("/new"),
         }]);
 
         let reading = published.read().unwrap();
@@ -1904,7 +1708,21 @@ mod tests {
         );
         drop(reading);
         swapper.join().unwrap();
-        assert_eq!(receiver.try_recv().unwrap(), ServerEvent::SlicesChanged);
-        assert_eq!(published.read().unwrap().slices.len(), 1);
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            ServerEvent::FolderAvailability {
+                shared_folder_id: folder,
+                available: false
+            }
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            ServerEvent::SharedFoldersChanged
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "the empty index didn't change"
+        );
+        assert_eq!(published.read().unwrap().folders.len(), 1);
     }
 }
