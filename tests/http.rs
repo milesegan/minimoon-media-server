@@ -471,8 +471,18 @@ async fn art_lyrics_and_resizing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn removed_items_are_not_served() {
     let f = start().await;
-    let id = f.item_id("small.bin").await;
-    std::fs::remove_file(f.media.path().join("small.bin")).unwrap();
+    // An image item's art is the image itself, so both routes serve it until it's removed.
+    let id = f.item_id("Album/cover.png").await;
+    for route in ["content", "art"] {
+        let response = f
+            .client
+            .get(f.url(&format!("/v1/items/{id}/{route}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+    }
+    std::fs::remove_file(f.media.path().join("Album/cover.png")).unwrap();
     f.wait_for_items(3).await;
     for route in ["content", "art", "lyrics"] {
         let response = f
