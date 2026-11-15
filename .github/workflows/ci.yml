@@ -13,4 +13,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Also writes the desktop app's TypeScript bindings from its Rust types: check they're current.
       - run: cargo test --all-targets --all-features
+      - name: Check the desktop app's TypeScript bindings are current
+        run: |
+          git diff --exit-code -- gui/src/backend/bindings
+          test -z "$(git status --porcelain -- gui/src/backend/bindings)"
+
+  # The desktop app's frontend. Its Rust types are checked above; the Tauri crate itself needs
+  # WebKitGTK to build, so it isn't built here.
+  gui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: gui/package.json
+          cache: true
+          cache_dependency_path: gui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm test
+      - run: pnpm build

@@ -26,3 +26,8 @@ export function pairedText(pairedAt: number): string {
     ? `Paired ${relative.format(-days, "day")}`
     : `Paired ${formatDate(pairedAt)}`;
 }
+
+/** "1:34", for a countdown. */
+export function formatTimeLeft(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}

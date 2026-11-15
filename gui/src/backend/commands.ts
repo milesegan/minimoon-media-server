@@ -1,7 +1,7 @@
 // The Tauri commands in `src-tauri/src/main.rs`, as typed functions.
 //
 // These only talk to the backend. Components call the ones that change something through
-// `run` from `useServer()`, which disables the controls meanwhile, shows any error and
+// `run` in the store, which disables the controls meanwhile, shows any error and
 // refreshes the status afterwards.
 
 import { invoke } from "@tauri-apps/api/core";

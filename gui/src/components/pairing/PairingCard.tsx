@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { formatTimeLeft } from "../../lib/format";
 import { useStore, type Pairing } from "../../store";
 import { CloseIcon } from "../icons";
 
@@ -66,11 +67,6 @@ function Code({ code }: { code: string }) {
       ))}
     </div>
   );
-}
-
-/** "1:34". */
-function formatTimeLeft(seconds: number): string {
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 /** The current time, updated once a second. */

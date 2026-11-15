@@ -10,9 +10,10 @@ keywords = ["media", "music", "video", "lan", "server"]
 categories = ["command-line-utilities", "web-programming::http-server"]
 
 [workspace]
-members = [".", "gui/src-tauri"]
-# The GUI needs a system webview to build; plain `cargo build`/`test` at the root skip it.
-default-members = ["."]
+members = [".", "gui/src-tauri", "gui/types"]
+# The GUI needs a system webview to build; plain `cargo build`/`test` at the root skip it. Its
+# types don't, so they're built and tested with the server, writing their TypeScript bindings.
+default-members = [".", "gui/types"]
 
 [lib]
 name = "minimoon_media_server"

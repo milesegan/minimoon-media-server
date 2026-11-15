@@ -13,7 +13,9 @@ use minimoon_media_server::settings::{
     default_data_dir, default_server_name, AuthMode, PairedDevice,
 };
 use minimoon_media_server::{MediaServer, ServerOptions};
-use serde::Serialize;
+use minimoon_media_server_gui_types::{
+    DeviceView, FolderView, PairingEvent, ServerView, Status, StatusPhase,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, UserAttentionType, WebviewWindow};
@@ -77,63 +79,6 @@ fn confirm(window: &WebviewWindow, title: &str, message: String, ok: &str) -> bo
 }
 
 // MARK: Status
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Status {
-    /// "starting", "failed" or "running".
-    phase: &'static str,
-    error: Option<String>,
-    data_dir: String,
-    server: Option<ServerView>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ServerView {
-    /// The name devices see.
-    name: String,
-    /// The saved name, or `None` for the host name.
-    custom_name: Option<String>,
-    /// This computer's own name, which devices see when there's no saved name.
-    host_name: String,
-    pairing: bool,
-    keep_awake: bool,
-    paused: bool,
-    address: Option<String>,
-    downloads: usize,
-    folders: Vec<FolderView>,
-    devices: Vec<DeviceView>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FolderView {
-    id: String,
-    name: String,
-    path: String,
-    shared: bool,
-    /// Why it isn't shared, when it isn't.
-    note: Option<String>,
-    /// What indexing is doing now, if anything.
-    activity: Option<String>,
-    /// Done and total for `activity`, when it's countable.
-    progress: Option<(usize, usize)>,
-    files: usize,
-    unreadable: usize,
-    scan_errors: Vec<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DeviceView {
-    client_id: String,
-    client_name: String,
-    app: String,
-    platform: String,
-    /// Milliseconds since the Unix epoch.
-    paired_at: u64,
-}
 
 fn folder_view(folder: SharedFolderStatus) -> FolderView {
     let note = (!folder.available).then(|| {
@@ -212,7 +157,7 @@ async fn status(app: State<'_, App>) -> Result<Status, String> {
         Phase::Running(server) => server.clone(),
         Phase::Starting => {
             return Ok(Status {
-                phase: "starting",
+                phase: StatusPhase::Starting,
                 error: None,
                 data_dir,
                 server: None,
@@ -220,7 +165,7 @@ async fn status(app: State<'_, App>) -> Result<Status, String> {
         }
         Phase::Failed(error) => {
             return Ok(Status {
-                phase: "failed",
+                phase: StatusPhase::Failed,
                 error: Some(error.clone()),
                 data_dir,
                 server: None,
@@ -267,7 +212,7 @@ async fn status(app: State<'_, App>) -> Result<Status, String> {
     })
     .await?;
     Ok(Status {
-        phase: "running",
+        phase: StatusPhase::Running,
         error: None,
         data_dir,
         server: Some(view),
@@ -450,17 +395,6 @@ async fn revoke_device(
 }
 
 // MARK: Startup
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PairingEvent {
-    pairing_id: String,
-    code: String,
-    client_name: String,
-    app: String,
-    platform: String,
-    expires_in_secs: u64,
-}
 
 /// Shows new pairing codes in the window.
 fn forward_pairing_requests(handle: AppHandle, server: &MediaServer) {
