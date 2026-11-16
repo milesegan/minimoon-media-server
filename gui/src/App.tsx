@@ -1,4 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { fitWindowHeight } from "./backend/commands";
 import { selectServer, useStore } from "./store";
 import { HeaderBand } from "./components/band/HeaderBand";
 import { Banners } from "./components/Banners";
@@ -18,6 +20,7 @@ const POLL_INTERVAL = 1000;
  */
 export default function App() {
   const server = useStore(selectServer);
+  const page = useFitWindowHeight();
   usePolling();
   useSuppressedWebviewMenu();
   useTitle(server ? `${server.name} – MiniMoon Media Server` : null);
@@ -25,7 +28,7 @@ export default function App() {
 
   return (
     <>
-      <div className="page">
+      <div className="page" ref={page}>
         <div className="top">
           <HeaderBand />
           <Banners />
@@ -43,6 +46,28 @@ export default function App() {
       <Toast />
     </>
   );
+}
+
+/** Follow changes to the page's natural height, including its padding. */
+function useFitWindowHeight() {
+  const page = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = page.current;
+    if (!isTauri() || !element) return;
+
+    let lastHeight = 0;
+    const observer = new ResizeObserver(() => {
+      const height = Math.ceil(element.getBoundingClientRect().height);
+      if (height === lastHeight || height === 0) return;
+      lastHeight = height;
+      void fitWindowHeight(height).catch((error: unknown) => {
+        console.warn("Couldn't fit the window to its content:", error);
+      });
+    });
+    observer.observe(element, { box: "border-box" });
+    return () => observer.disconnect();
+  }, []);
+  return page;
 }
 
 /** Fetches the status now and then once a second. */

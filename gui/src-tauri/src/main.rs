@@ -21,7 +21,9 @@ use minimoon_media_server_gui_types::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State, UserAttentionType, WebviewWindow};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalSize, RunEvent, State, UserAttentionType, WebviewWindow,
+};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::broadcast::error::RecvError;
 use tracing_subscriber::filter::LevelFilter;
@@ -79,6 +81,41 @@ fn confirm(window: &WebviewWindow, title: &str, message: String, ok: &str) -> bo
             "Cancel".into(),
         ))
         .blocking_show()
+}
+
+/// Adjust the height without changing the width or leaving the monitor's work area.
+#[tauri::command]
+fn fit_window_height(window: WebviewWindow, height: u32) -> tauri::Result<()> {
+    if window.is_fullscreen()? || window.is_maximized()? {
+        return Ok(());
+    }
+
+    let inner = window.inner_size()?;
+    let chrome = window.outer_size()?.height.saturating_sub(inner.height);
+    let mut height = (f64::from(height) * window.scale_factor()?).ceil() as u32;
+    let monitor = window.current_monitor()?;
+    if let Some(monitor) = &monitor {
+        height = height.min(monitor.work_area().size.height.saturating_sub(chrome));
+    }
+    if height == 0 || height == inner.height {
+        return Ok(());
+    }
+
+    window.set_size(PhysicalSize::new(inner.width, height))?;
+    // Keep the title bar where it was unless the resized window would run off the screen.
+    if let (Some(monitor), Ok(mut position)) = (monitor, window.outer_position()) {
+        let area = monitor.work_area();
+        let max_y = area
+            .position
+            .y
+            .saturating_add_unsigned(area.size.height.saturating_sub(height + chrome));
+        let y = position.y.clamp(area.position.y, max_y);
+        if y != position.y {
+            position.y = y;
+            window.set_position(position)?;
+        }
+    }
+    Ok(())
 }
 
 // MARK: Status
@@ -485,6 +522,7 @@ fn main() -> Result<()> {
             data_dir,
         })
         .invoke_handler(tauri::generate_handler![
+            fit_window_height,
             status,
             set_paused,
             set_name,

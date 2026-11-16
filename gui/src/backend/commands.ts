@@ -11,6 +11,10 @@ import type { PairingRequest, Status } from "./types";
 /** Everything the window shows. Polled once a second. */
 export const fetchStatus = () => invoke<Status>("status");
 
+/** Fits the native window to the measured page height in CSS pixels. */
+export const fitWindowHeight = (height: number) =>
+  invoke<void>("fit_window_height", { height });
+
 // MARK: Sharing
 
 export const setPaused = (paused: boolean) =>
