@@ -1,0 +1,128 @@
+name: macOS Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      BUNDLE_DIR: target/universal-apple-darwin/release/bundle
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check signing and notarization secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing repository secret $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Check tag matches package versions
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! cargo metadata --no-deps --locked --format-version 1 |
+            jq -e --arg version "$version" '.packages | all(.version == $version)' >/dev/null ||
+            ! jq -e --arg version "$version" '.version == $version' gui/package.json >/dev/null; then
+            echo "::error::Tag $GITHUB_REF_NAME must match the Cargo workspace and gui/package.json versions"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: gui/package.json
+          cache: true
+          cache_dependency_path: gui/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: gui
+      - run: pnpm test
+        working-directory: gui
+      - run: cargo test --workspace --all-targets --locked
+
+      # Tauri signs the app and DMG. Submit the DMG separately so Apple issues a ticket for the download itself.
+      - name: Build and sign universal installer
+        working-directory: gui
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg -- --locked
+
+      - name: Verify and notarize the DMG
+        id: installer
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          shopt -s nullglob
+          apps=("$BUNDLE_DIR"/macos/*.app)
+          dmgs=("$BUNDLE_DIR"/dmg/*.dmg)
+          if [[ ${#apps[@]} != 1 || ${#dmgs[@]} != 1 ]]; then
+            echo "::error::Expected one application and one disk image in $BUNDLE_DIR"
+            exit 1
+          fi
+          app="${apps[0]}"
+          dmg="${dmgs[0]}"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --verify --verbose=2 "$dmg"
+          xcrun notarytool submit "$dmg" --wait \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          printf 'dmg=%s\n' "$dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DMG: ${{ steps.installer.outputs.dmg }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if draft=$(gh release view "$tag" --json isDraft --jq '.isDraft'); then
+            if [[ "$draft" != true ]]; then
+              echo "Release $tag is already published."
+              exit 0
+            fi
+          else
+            gh release create "$tag" --verify-tag --draft --title "MiniMoon Media Server $tag" \
+              --notes 'Download the DMG, open it, and drag MiniMoon Media Server to Applications. The installer contains both Apple silicon and Intel builds.'
+          fi
+          gh release upload "$tag" "$DMG" --clobber
+          gh release edit "$tag" --draft=false
