@@ -1,6 +1,6 @@
 [package]
 name = "minimoon-media-server-gui"
-version = "0.5.0"
+version = "1.0.0"
 edition = "2021"
 description = "Desktop app to configure and control the MiniMoon Media Server"
 license = "MIT"

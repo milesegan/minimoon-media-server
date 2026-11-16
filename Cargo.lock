@@ -2210,7 +2210,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minimoon-media-server"
-version = "0.5.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "minimoon-media-server-gui"
-version = "0.5.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "minimoon-media-server",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "minimoon-media-server-gui-types"
-version = "0.5.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "ts-rs",
