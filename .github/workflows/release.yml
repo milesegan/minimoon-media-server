@@ -17,6 +17,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       BUNDLE_DIR: target/universal-apple-darwin/release/bundle
+      UPDATE_ASSET: MiniMoon-Media-Server.app.tar.gz
     defaults:
       run:
         shell: bash
@@ -29,9 +30,10 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           missing=0
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY; do
             if [[ -z "${!name}" ]]; then
               echo "::error::Missing repository secret $name"
               missing=1
@@ -73,17 +75,25 @@ jobs:
         working-directory: gui
       - run: cargo test --workspace --all-targets --locked
 
-      # Tauri signs the app and DMG. Submit the DMG separately so Apple issues a ticket for the download itself.
-      - name: Build and sign universal installer
+      # Tauri notarizes and staples the app before archiving it for the updater.
+      - name: Build universal installer and signed updater archive
         working-directory: gui
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg -- --locked
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          pnpm tauri build --ci --target universal-apple-darwin --bundles app,dmg \
+            --config '{"bundle":{"createUpdaterArtifacts":true}}' -- --locked
 
-      - name: Verify and notarize the DMG
-        id: installer
+      # Submit the DMG separately so Apple issues a ticket for the installer download itself.
+      - name: Verify updater archive and notarize the DMG
+        id: assets
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -98,21 +108,41 @@ jobs:
           fi
           app="${apps[0]}"
           dmg="${dmgs[0]}"
-          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-          lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
-          codesign --verify --deep --strict --verbose=2 "$app"
+          archive="$app.tar.gz"
+          signature="$archive.sig"
+          if [[ ! -s "$archive" || ! -s "$signature" ]]; then
+            echo "::error::Missing signed updater archive in $BUNDLE_DIR"
+            exit 1
+          fi
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          tar -xzf "$archive" -C "$extracted"
+          archived_app="$extracted/$(basename "$app")"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$archived_app/Contents/Info.plist")
+          architectures=" $(lipo -archs "$archived_app/Contents/MacOS/$executable") "
+          if [[ "$architectures" != *" arm64 "* || "$architectures" != *" x86_64 "* ]]; then
+            echo "::error::Updater archive must contain both arm64 and x86_64"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$archived_app"
+          xcrun stapler validate "$archived_app"
+
           codesign --verify --verbose=2 "$dmg"
           xcrun notarytool submit "$dmg" --wait \
             --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
           xcrun stapler staple "$dmg"
           xcrun stapler validate "$dmg"
+
+          # Use a URL-safe asset name that GitHub Releases will preserve.
+          mv "$archive" "$BUNDLE_DIR/$UPDATE_ASSET"
+          mv "$signature" "$BUNDLE_DIR/$UPDATE_ASSET.sig"
           printf 'dmg=%s\n' "$dmg" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          DMG: ${{ steps.installer.outputs.dmg }}
+          DMG: ${{ steps.assets.outputs.dmg }}
         run: |
           tag="$GITHUB_REF_NAME"
           if draft=$(gh release view "$tag" --json isDraft --jq '.isDraft'); then
@@ -124,5 +154,12 @@ jobs:
             gh release create "$tag" --verify-tag --draft --title "MiniMoon Media Server $tag" \
               --notes 'Download the DMG, open it, and drag MiniMoon Media Server to Applications. The installer contains both Apple silicon and Intel builds.'
           fi
-          gh release upload "$tag" "$DMG" --clobber
+          archive="$BUNDLE_DIR/$UPDATE_ASSET"
+          url="https://github.com/$GH_REPO/releases/download/$tag/$UPDATE_ASSET"
+          jq -n --arg version "${tag#v}" --arg url "$url" \
+            --arg signature "$(tr -d '\r\n' < "$archive.sig")" '
+            {url: $url, signature: $signature} as $mac |
+            {version: $version, platforms: {"darwin-aarch64": $mac, "darwin-x86_64": $mac}}
+          ' > "$BUNDLE_DIR/latest.json"
+          gh release upload "$tag" "$DMG" "$archive" "$archive.sig" "$BUNDLE_DIR/latest.json" --clobber
           gh release edit "$tag" --draft=false

@@ -1,6 +1,6 @@
 [package]
 name = "minimoon-media-server"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "LAN media server for the MiniMoon and Matinee apps, speaking the MiniMoon Media Protocol (MMP)"
 license = "MIT"

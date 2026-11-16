@@ -5,6 +5,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod updates;
+
 use anyhow::{bail, Context, Result};
 use minimoon_media_server::library::NOT_INDEXED_YET;
 use minimoon_media_server::library::{IndexActivity, LibraryOptions, SharedFolderStatus};
@@ -471,7 +474,11 @@ fn main() -> Result<()> {
         options.port = port;
     }
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = updates::configure(builder);
+
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .manage(App {
             phase: Mutex::new(Phase::Starting),
@@ -494,6 +501,10 @@ fn main() -> Result<()> {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            #[cfg(target_os = "macos")]
+            if !tauri::is_dev() {
+                updates::check(&handle, false);
+            }
             tauri::async_runtime::spawn(async move {
                 let phase = match MediaServer::start(options).await {
                     Ok(server) => {
