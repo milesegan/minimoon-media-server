@@ -1,9 +1,7 @@
-# MiniMoon Media Protocol (MMP) v1: proposal
+# MiniMoon Media Protocol (MMP) v1
 
-Status: revised 2026-11-15. The server side of protocol 1.0 is built in this repository (§10 lists what's done and what isn't). The shared client package and the apps' support aren't built.
-
-- **Server:** minimoon-media-server, the renamed minimoon-sync.
-- **Clients:** MiniMoon (macOS, iOS, tvOS) and Matinee (tvOS, macOS).
+- **Server:** `minimoon-media-server` implements MMP 1.0.
+- **Clients:** MMP is designed for MiniMoon (macOS, iOS, tvOS) and Matinee (tvOS, macOS).
 - **MMP only:** the server speaks only MMP. The Sync app's protocol (`/files`, `/file-by-path` on port 41324) is dropped, not kept alongside. The apps handle the move from it to MMP; that transition is outside this spec.
 - **Read-only:** clients never write anything to the server or its folders. Every index and item route is a GET; the only POSTs are the pairing routes, which record a device in the server's own settings (§4). Watch progress, play counts, favourites and every other kind of per-user state stay on the client device, as they do today.
 
@@ -19,7 +17,6 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
    - **Jellyfin:** its setup wizard creates an admin account and libraries in a web dashboard.
    - **Plex:** needs a plex.tv account.
    - **Navidrome:** runs as a service and is configured by hand.
-   - **Who it reaches:** MiniMoon Sync users already installed this app on their Mac or PC and get it auto-updated, so they can be reached with no new install.
 2. **Built for a full local copy.** One endpoint returns the whole library index in one response, and answers `304` when nothing has changed. Clients keep a complete local index, so browsing and search are instant, and the library can still be browsed while the host sleeps. A tvOS cache purge costs one re-download, not a rescan.
    - **Subsonic/OpenSubsonic:** has no efficient way to fetch everything. Offline-first clients like Symfonium rely on an empty-query `search3` that the spec doesn't define and that some servers don't support. I found no change feed.
    - **Jellyfin:** pages through item queries. Whether it has a general change feed is unverified.
@@ -35,10 +32,9 @@ Three claims hold up. Some common claims don't, and shouldn't be made.
 
 - **The host has to be awake.** That's true of every server here; only SMB on an always-on NAS avoids it.
 - **No remote access, transcoding, multiple users, server-side metadata scraping or server-held watch state.** Jellyfin and Plex have all of these; MMP deliberately doesn't.
-- **Cross-device watch progress.** The server doesn't store state, so it doesn't sync progress between Apple TVs. Matinee's plan for that is iCloud (`docs/monetization.md`), which also covers SMB shares and uploads.
+- **Cross-device watch progress.** The server leaves watch progress on the client device.
 
 **Who it's for:** people whose music and videos are on a Mac or PC and who would never run Jellyfin.
-**Who it's not for:** homelab users who already run Jellyfin or Navidrome. Reach them later with Jellyfin and OpenSubsonic backends behind the same `LibrarySource` protocol in each app, not by out-featuring those servers.
 
 ## 2. Design principles
 
@@ -166,7 +162,7 @@ There is one household and no user accounts. Every client that can reach the ser
   - **Offline folders lose nothing.** For a shared folder listed in `offline`, the client adds and updates items from the response but never removes any. That holds whether the server sends its last snapshot or, after an index rebuild, no items for that folder at all. Removals under that folder are applied once it's back online.
   - **Metadata always comes from the newest index.** The client replaces every item's metadata (tags, audio, video facts) from each index it accepts, whether or not the file's size or mtime changed, so metadata corrected on the server reaches clients without any media being downloaded again.
   - **Media is downloaded again only when `size`, `mtime` or `rev` changed** (`rev` is defined in the wire schema below).
-  - This is MiniMoon's iOS sync today (`SyncService.preparePlan`), plus the metadata rule. Run the comparison off the main actor: on a large library it once blocked the main actor for seconds (MINIMOON-B9).
+  - **Compare off the main actor** to keep the interface responsive while processing large libraries.
 - **The file list (`?view=files`).** A much smaller index for clients that copy the files and read their tags themselves, as MiniMoon's iOS app does today: it downloads changed files and rescans them, so it has no use for the server's metadata.
   - **`view`** takes exactly two values: `full` (the default when absent) and `files`. Any other value gets `400 unsupported_feature`. It's not a field list, so there's nothing to combine or parse.
   - **Response:**
@@ -195,7 +191,6 @@ There is one household and no user accounts. Every client that can reach the ser
   - **One step.** A completed scan replaces the folder's snapshot in a single database transaction, and the index ETags are computed after it. A client never sees half a scan.
   - **No previous snapshot.** On the first scan of a newly added folder, or after the server's index has been rebuilt from scratch, the folder is published only once a scan completes. Until then it's listed as unavailable, not partial, and listed in `offline` with no items. That matters after a rebuild, when clients still hold copies the server no longer knows about: the client rule for offline folders (above) keeps them. A rebuild loses only the index; shared folders, their UUIDs and volume identities live in the server's settings (§8), so they survive it.
 - **Shared folder removed in the desktop app:** it drops out of `/v1/server` and its items drop out of the index, so clients remove them through the normal comparison. Only a shared folder that is still listed but unavailable keeps its items on clients (`offline`, above).
-- **Size (estimated, not measured):** the example audio item below is about 650 bytes of JSON, so 40,000 tracks is roughly 25 MB, a few MB gzipped. A video item is somewhat larger because of its streams, but video libraries hold far fewer files. Parsing and comparing a 100,000-track library on an Apple TV should be measured before relying on it. If it proves too slow, a delta endpoint can be added later as an optional feature, since v1 changes are additive.
 
 **Wire schema**
 
@@ -217,7 +212,7 @@ There is one household and no user accounts. Every client that can reach the ser
   - **Limits (best effort):** events the watcher never sees are missed:
     - **while the server isn't running:** on macOS the watcher resumes from its last FSEvents event id, kept in settings, so writes made meanwhile are replayed unless the system has purged that history; on Linux and Windows they're missed;
     - **when events overflow** (FSEvents `MustScanSubDirs`, inotify `IN_Q_OVERFLOW`, a `ReadDirectoryChangesW` buffer overflow): the server rescans that subtree by size and mtime, which can't see an mtime-preserving write, and logs it, rather than bumping every file in it;
-    - **on network volumes** the host mounts, whose events are unreliable (§11).
+    - **on network volumes** the host mounts, whose events are unreliable (§10).
 
 ```json
 {
@@ -276,13 +271,13 @@ There is one household and no user accounts. Every client that can reach the ser
 ```
 
   - **`streams`:** every track, in container order.
-    - **`trackNumber`** is the container's own track identifier (Matroska `TrackNumber`, MP4 `track_ID`). Clients use it to match a stream to the player's tracks; container order alone isn't safe, because players can skip or renumber tracks. How each player's track ids map to `trackNumber` has to be confirmed per player (§11).
+    - **`trackNumber`** is the container's own track identifier (Matroska `TrackNumber`, MP4 `track_ID`). Clients use it to match a stream to the player's tracks; container order alone isn't safe, because players can skip or renumber tracks. How each player's track ids map to `trackNumber` has to be confirmed per player (§10).
     - **Video streams** give codec, size, frame rate and colour facts: `transfer` (`sdr`, `pq` or `hlg`), `dolbyVisionProfile` (a number such as `5` or `8`, present only when Dolby Vision is detected) and `hdr10Plus` (`true` only when detected).
     - **Audio streams** give codec and channels; **subtitle streams** give codec.
     - **Every stream** gives language, title and default/forced flags where the container has them.
   - **Detected versus absent.** An absent `dolbyVisionProfile` or `hdr10Plus` means "not detected", not "confirmed absent". HDR10+ in particular is checked in the first frame only. Clients treat absence as unknown.
-  - **Reading rules** that the reader test showed are needed:
-    - **Colour comes from the codec headers.** `transfer` is read from the HEVC or H.264 SPS colour fields (VUI) or the AV1 sequence header. Matroska `Colour` elements are used only if present; none of 106 real MKVs had them.
+  - **Reading rules:**
+    - **Colour comes from the codec headers.** `transfer` is read from the HEVC or H.264 SPS colour fields (VUI) or the AV1 sequence header. Matroska `Colour` elements are used only if present.
     - **Dolby Vision** comes from the configuration record (Matroska `BlockAdditionMapping` or MP4 `dvcC`/`dvvC`). Profile 5 implies PQ even though its base layer usually carries no transfer value.
     - **HDR10+** is only in SEI messages in the frames, so the reader checks the first HEVC frame.
     - **`frameRate`** is the nominal rate: Matroska `DefaultDuration`, or MP4 sample durations, falling back to timing the first frames. Variable-rate files report their nominal rate.
@@ -294,7 +289,7 @@ There is one household and no user accounts. Every client that can reach the ser
     - dynamic range, from `transfer`, `dolbyVisionProfile` and `hdr10Plus`;
     - the first audio stream's codec and channels;
     - audio and subtitle stream counts.
-    Matinee fills `ProbeResult` from the index and skips its own VLCKit probe. That probe costs a network parse of up to 10 seconds per share file today, repeated after every tvOS cache purge. Per-track language and default/forced flags, together with `trackNumber`, also let it apply audio and subtitle language preferences before playback.
+    Matinee fills `ProbeResult` from the index and skips its own VLCKit probe. Per-track language and default/forced flags, together with `trackNumber`, also let it apply audio and subtitle language preferences before playback.
   - **Unreadable files:** a file whose metadata can't be read is still listed and served, with only the required fields and `mime` (which comes from the extension). Matinee falls back to probing it with VLCKit as today.
 - **Identity:**
   - **`id`** is a hash of the shared folder's `id` and the item's `path`. It survives server index rebuilds and changes only when the file is moved or renamed on disk. Renaming a shared folder's display name changes nothing. Used in content, art and lyrics URLs.
@@ -319,12 +314,12 @@ There is one household and no user accounts. Every client that can reach the ser
     - after reading the response's final chunk from disk, and before sending it, it checks them again, and checks whether the watcher has reported a write to that file since the response started;
     - if anything changed, it closes the connection without sending that chunk, so the client sees an incomplete transfer, not a silently mixed file.
     This catches a write that updates the mtime, and a write the watcher reports even if the mtime is put back afterwards. It misses a write whose mtime was restored and whose event hasn't arrived or was lost, and on network volumes the host mounts, attribute caching and unreliable events can hide a change. The whole mechanism is best effort. Apps that save by writing a new file and renaming it over the old one are safe anyway on macOS and Linux, because the server keeps reading the file it opened.
-  - **Across range requests.** A player seeking through a file makes many separate requests. Each response carries the ETag, but a changed file is caught across requests only if the player sends `If-Range`, or compares the ETag itself. Whether VLCKit and AVPlayer do is unverified and is part of the playback test (§10). Until that's known, consistency across a playback session is best effort.
+  - **Across range requests.** A player seeking through a file makes many separate requests. Each response carries the ETag, but a changed file is caught across requests only if the player sends `If-Range`, or compares the ETag itself. Whether VLCKit and AVPlayer do is unverified (§10). Until that's known, consistency across a playback session is best effort.
   - **Interrupted downloads** resume with `Range` plus `If-Range`:
     - **`206`:** the client checks that `Content-Range` starts exactly at the length of its partial file, appends the body, and checks the finished file's length against the total in `Content-Range` (the `/<size>` part). `Content-Length` on a `206` is the length of the range, not of the file.
     - **`200`:** the file changed in the meantime, or the server ignored the range. The client discards its partial copy and writes the body from the start, checking it against `Content-Length`.
   - **MiniMoon:** downloads to its cache, checks the finished file's length as above, then opens it with `AVAudioFile`.
-  - **Matinee:** hands VLCKit the URL and streams directly. Whether VLCKit's HTTP access plays, seeks and recovers correctly against this server is the first thing to test once a prototype server exists (§10).
+  - **Matinee:** hands VLCKit the URL and streams directly. Playback, seeking and recovery against this server are listed under unverified behavior (§10).
 - **Embedded artwork:** `GET /v1/items/{id}/art` returns the first embedded picture, or `404`. For video, that's a Matroska cover attachment or the MP4 `covr` atom. For an `image` item it's the image itself. Same headers and conditional-request rules as content.
 - **Resized images** (`art-resize` feature): `?maxSize=600` scales either an item's embedded art or an `image` item's content to fit within 600 pixels, as JPEG. Results are cached in the server's app-data directory, never next to the media. The cache key is the item `id`, its content ETag, the requested `maxSize` and the resizer's version number, so a changed source, a different size or an improved resizer each produce a new entry.
 - **Embedded lyrics:** `GET /v1/items/{id}/lyrics` returns `text/plain`.
@@ -334,7 +329,7 @@ There is one household and no user accounts. Every client that can reach the ser
 The server stores nothing on behalf of clients. Each app keeps its state where it does today:
 - **Matinee:** `PersistentRecord` in UserDefaults on the Apple TV (400 KB budget). A share file gets a record entry only once it has state worth keeping (watched, a position, a Fix Match or rename, a track choice); its automatic match lives in a purgeable cache sidecar. MMP files would follow the same rule.
 - **MiniMoon:** its own library database on each device.
-- **Syncing state between devices** is a separate decision outside MMP. Matinee's candidate is iCloud (`docs/monetization.md`).
+- **Syncing state between devices** is outside the scope of MMP.
 
 ## 8. Server behaviour
 
@@ -368,7 +363,7 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 - **Tag reading: a copy, not a dependency.**
   - **What's copied.** The server doesn't depend on the apps' `minimoon_tags` crate. It carries a copy of only the reading side: `read_tag` and its helpers, the native-text and sort-tag reading, and embedded-picture reading. The crate's writing and tag-copying code, and its C interface for Swift, stay out.
   - **Why.** The crate is a thin layer over `lofty`, so the copy is small. The server avoids building the apps' static library and its Swift-facing interface, and it doesn't carry write code it must never call (§2, read-only).
-  - **`lofty` version.** The crate pins `lofty` to a git revision for an ID3v2 write fix. The read-only copy uses the crates.io release 0.25.5. It read 1,011 sample files identically to the pinned revision (§11).
+  - **`lofty` version.** The crate pins `lofty` to a git revision for an ID3v2 write fix. The read-only copy uses the crates.io release 0.25.5.
   - **Keeping them aligned.** Advantage 3 (§1) depends on the server and the apps reading tags the same way, and a copy can drift. A comparison test runs both readers over the same sample files and fails on any difference in the fields MMP sends. When the apps' reader changes, the copy is updated and its reader version (§8, index) is bumped, so existing files are re-read.
 - **Reading metadata safely:**
   - a failure to read a file's metadata never stops the file being listed or served (§5);
@@ -396,81 +391,20 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 - **Inside shared folders only.** The server never exposes paths outside the shared folders, filters hidden files and rejects path traversal. This matters more in open mode.
 - **Symbolic links are never followed,** wherever they point. A link in a shared folder, whether made by the user or unpacked from an archive, could otherwise publish anything it points at to everyone on the network. Scans skip links, and serving a file refuses any path with a link in it. On macOS and Linux content is opened one path component at a time with `O_NOFOLLOW`, so a link swapped in after the check can't be followed either; on Windows, and for embedded art and lyrics (read by path by the tag reader), a short window remains for someone who can already write in the shared folder. To share a drive or another folder, the user adds it as a shared folder of its own. The Sync server's `/file` route skips some of these filters, so it's not a model to copy.
 
-## 10. Smallest first version
-
-**Where the server stands (2026-11-15).** Steps 2–5, 7 and 8 below are built, including pairing, signed URLs, `events` and `art-resize`:
-- **Not done:** step 1, the playback test, needs Matinee and MiniMoon builds that speak MMP. Step 6 belongs to the desktop app (`minimoon-sync`), which still embeds the old server: the server exposes what that UI needs (shared folders, subfolders that can't be read, pausing, pairing and devices, error counts, "Reindex everything") but nothing calls it yet.
-- **Tested:** on macOS only. The Windows code paths were type-checked, and the Linux ones through an Android target that shares them; neither was built or run on its own platform.
-- **Additions beyond the steps:** the ctime check on `rev` bumps (§5), and an idle-sleep assertion while content streams (§8).
-
-**Core**
-
-- **Server:**
-  1. **A playback test first.** Build a minimal `/content` endpoint with the HTTP contract in §6. Before anything else depends on it, check that VLCKit (Matinee) and AVPlayer/URLSession (MiniMoon) play, seek, and recover from a dropped connection and a changed file, including whether each sends `If-Range` or checks the ETag across range requests.
-  2. Rename and rebrand the server, and remove the Sync protocol's routes. An upgraded server no longer answers older MiniMoon iOS versions, so an app version that speaks MMP has to ship before or with it; the apps own that transition. Keep the bundle identifier (`com.plastaq.sync-server`) and the updater endpoint so existing installs upgrade in place. Whether the Tauri updater handles a product-name change cleanly is unverified.
-  3. `/v1/server` and Bonjour advertising, open mode only.
-  4. **The index:**
-     - shared folders (UUIDs, paths, names, volume identities), bumped `rev` values and their counter in the server's settings, and a SQLite index of files and metadata, with reader versions and read status;
-     - a file-level watcher that bumps `rev` on in-place writes (§5), resuming from its last event id on macOS. The `notify` crate (8.2.2) covers Linux (inotify, with a watch per directory and `IN_Q_OVERFLOW` reported as a rescan) and Windows. Its FSEvents backend always starts from "now" and doesn't expose event ids, so replay after a restart on macOS needs the server's own FSEvents stream, or a patch to `notify` that exposes the starting id;
-     - the scan-safety rules in §5: the volume check, unreadable paths treated as absent, one-step publication, no partial first publish;
-     - `/v1/index` with weak ETags and `304`, in both views (`full` and `files`), each with its own ETag.
-     This is the largest server piece.
-  5. `/content` (from step 1), `/art` and `/lyrics`.
-  6. **Desktop app UI:**
-     - shared folders and their display names;
-     - the sharing network and a pause control;
-     - read-error and metadata-error reporting, and "Reindex everything".
-     The Sync app's selection tree and presets go away; every device gets everything under the shared folders (§4).
-  7. **Tag reading, copied in.** Copy the reading side of `minimoon_tags` into the server (§8), and extend the copy with duration in milliseconds (the crate reports whole seconds, `properties.duration().as_secs()`) and a channel count. The apps' crate doesn't change.
-  8. **Video reading in native Rust**, chosen by the reader test ([video-reader-test.md](video-reader-test.md), 2026-11-14):
-     - **Crates:** `matroska-demuxer`, `mp4-atom`, `scuffle-h265`, `h264-reader`, `scuffle-av1`, and `lofty` for MP4 tags.
-     - **Hand-written parsing:** about 240 lines, covering the Dolby Vision configuration record, Matroska attachment headers, raw EBML and MP4 box scanning (`mp4-atom` drops `dvcC`/`dvvC`), and the HDR10+ SEI check.
-     - **Results:** on 107 real files, it agreed with ffprobe and MediaInfo on duration, codec, size, transfer, Dolby Vision, HDR10+ and covers for every file. The tools differed on frame rate, channel count, language and title for some files, as listed in the report. On 10 synthetic HDR clips it detected every HDR10, HLG, HDR10+ and Dolby Vision 5 and 8.1 case, but didn't read the MP4 forced flag. It ran in a median of 19 ms and read a median of 100 KB per file. ffprobe read 5 MB per file and would need a custom LGPL build; MediaInfoLib is an 8 MB C++ library needing FFI. The test is not comprehensive format validation; its gaps are listed in the report and in §11.
-     - **Done since the test:** MP4 forced flags (ffmpeg's `kind` box), default flags and track titles (`udta/name`); HE-AAC with SBR reported as 2 channels unless its config rules parametric stereo out; `trackNumber` on every stream. On the same 117 files nothing regressed, the three HE-AAC trailers now agree with ffprobe, and the synthetic MP4s' forced flags are 10/10.
-     - **Placement:** in the server, next to the copied tag reader.
-- **Shared Swift client package:** used by both MiniMoon and Matinee, as a new Swift package with its own repo, since Matinee and MiniMoon are separate repos. It covers:
-  - discovery (`NWBrowser`);
-  - fetching `/v1/index` in either view with `If-None-Match`, and applying it all-or-nothing in one transaction, off the main actor;
-  - comparing by item `id`, with app state keys kept for state lookups only;
-  - the metadata rule;
-  - offline folders, never removing their items;
-  - content URLs with resumable downloads checked against `Content-Range`, and an error mapping.
-- **MiniMoon:**
-  - **iOS (copies files):** syncs from the file list (`?view=files`). It syncs the whole list, downloading added and changed files and rescans them locally, as it does today against `/files`. This replaces its Sync-protocol client for MMP servers, with offline folders and resumable downloads added.
-  - **macOS and tvOS (no local copy):** an MMP `LibrarySource` mapping items from the full index to `Track` rows, plus fetch-to-cache playback.
-- **Matinee:** an MMP source feeding `LibraryStore` the way a share does, filling `ProbeResult` from each item's `video` facts instead of probing, and matching streams to VLCKit tracks by `trackNumber`. It plays content URLs through VLCKit. Its existing share machinery (record keys, the state-worth-keeping rule, offline state, the title cap) applies.
-
-**Next (already designed above; the server side is built)**
-
-- Optional pairing code, tokens and signed URLs bound to device and generation (server setting, client pairing screen, Keychain storage).
-- `events` (SSE).
-- `art-resize`.
-
-**Later, separate decisions**
-
-- TLS.
-- Pausing on unrecognised networks.
-- Jellyfin and OpenSubsonic client backends in the apps.
-- Chapters and more video facts (bit depth, bitrate per stream), added to `streams` as optional fields.
-
-**Out of scope for MMP:** any write route, including state sync. Cross-device state, if wanted, goes through iCloud or another channel the apps own.
-
-## 11. Verified vs unverified
+## 10. Verified vs unverified
 
 **Verified**
 
 - **Code:**
   - The `minimoon_tags` `Tag` and `Properties` fields: single-string artist, ReplayGain gains only, duration in whole seconds, no channel count.
-  - `minimoon_tags` (`~/c/m/tagging`) is a thin layer over `lofty`. Its reading side is `read_tag` and its helpers in `tag.rs`, the reading helpers in `native_text.rs` and `sort.rs`, and `get_picture_from_path`. It also writes and copies tags, which the server doesn't need. It pins `lofty` to a git revision for an ID3v2 write fix (`Cargo.toml`).
+  - `minimoon_tags` is a thin layer over `lofty`. Its reading side is `read_tag` and its helpers in `tag.rs`, the reading helpers in `native_text.rs` and `sort.rs`, and `get_picture_from_path`. It also writes and copies tags, which the server doesn't need. It pins `lofty` to a git revision for an ID3v2 write fix (`Cargo.toml`).
   - Matinee's watch state is on-device only: `PersistentRecord` in UserDefaults with a 400 KB budget (`PersistentRecord.swift`). Share files get an entry only once they have state worth keeping (`LibraryStore+Shares.swift`).
   - Matinee keys share files by name + size (`ShareScanner.swift`, `ShareKeys.ownKey`); uploads add a first/last-MB hash (`FileHashing.swift`).
   - Matinee already plays and lists SMB through VLCKit 4.
-  - Running Matinee's prober code over 107 real files, its VLCKit path never set a dynamic range, so MKV and share files get no HDR or Dolby Vision label. It also missed the frame rate for 5 files and reported HE-AAC parametric stereo as mono ([video-reader-test.md](video-reader-test.md)).
-  - The video reader test: native Rust, ffprobe and MediaInfo agree on duration, codec, size, transfer, Dolby Vision, HDR10+ and covers for all 107 real files. On 10 synthetic HDR clips all three detected every HDR format and read the audio tracks, tags and covers correctly; the Rust probe didn't read the MP4 forced flag ([video-reader-test.md](video-reader-test.md)).
-  - Matinee probes each video once and caches a `ProbeResult` in a purgeable sidecar (`Playback.swift`, `LibraryStore.swift`). It holds duration, size, video codec, dynamic range, frame rate, the first audio track's codec and channels, and audio and subtitle track counts. Local MP4 and MOV files go through AVFoundation; everything else, including share files, goes through a VLCKit parse with a 10-second limit (`VLCKitProber` in `VLCKitEngine.swift`).
-  - MiniMoon's iOS sync already downloads the full `/files` list and compares by library-relative path, size and mtime (`SyncService.swift`); the comparison once blocked the main actor on a large library (MINIMOON-B9).
+  - Matinee probes each video once and caches a `ProbeResult` in a purgeable sidecar (`Playback.swift`, `LibraryStore.swift`). It holds duration, size, video codec, dynamic range, frame rate, the first audio track's codec and channels, and audio and subtitle track counts. Local MP4 and MOV files go through AVFoundation. Other files, including share files, use VLCKit.
+  - MiniMoon's iOS sync downloads the full `/files` list and compares by library-relative path, size and mtime (`SyncService.swift`).
   - The Sync server has no auth.
-  - `lofty` reads no video fields and fails on Matroska; it reads MP4 tags and covers correctly (video reader test).
+  - The video reader uses `lofty` for MP4 tags and covers.
   - The tag reader's fields (`tagging/src/tag.rs`):
     - it has no movement field;
     - it reads both a year field and a recording date, whose year it keeps;
@@ -487,9 +421,8 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
   - An in-place write that restores the file's mtime is reported by FSEvents as `ItemModified` and bumps `rev`. A write made while the server is stopped is replayed from the stored event id and bumps `rev` after the restart. FSEvents repeated a file's write flag in a later event, which bumped `rev` twice until the ctime check was added.
   - A transfer of a file written mid-transfer (mtime restored) is cut short before its last chunk. Revoking a device closes its open download and its event stream; pausing closes event streams too.
   - The `rev` counter, ids and `rev` values survive a restart and an index rebuild. A folder on an unmounted volume keeps serving its last snapshot and is listed in `offline`. A path the server can't read is left out of the index until it can be.
-  - The copied tag reader on crates.io `lofty` 0.25.5 read 1,011 sample files (MP3, WAV, M4A, AIFF, FLAC, MPC, APE, Ogg, WavPack, Opus, Speex) identically to the apps' crate on its pinned revision.
-  - ID3 `POPM` ratings and unsynced lyrics (ID3 `USLT`, Vorbis `UNSYNCEDLYRICS`) were gaps in the apps' reader, which the copy matched: `lofty` presents `POPM` as `email|stars|counter` text, and maps unsynced lyrics to `ItemKey::UnsyncLyrics`, which the reader didn't look at. The apps' reader now reads both, and the copy (reader version 2) has the same change, checked by the apps' tests for it on MP3, WAV and FLAC files. The 1,011-file comparison above predates that change.
-  - A first scan of 29,722 local files (107 videos and Logic Pro's sample library) took about 5 seconds. Its index is 13.4 MB, 1.1 MB gzipped.
+  - The copied tag reader on crates.io `lofty` 0.25.5 matched the apps' tag reader on its pinned revision across sample files in MP3, WAV, M4A, AIFF, FLAC, MPC, APE, Ogg, WavPack, Opus and Speex.
+  - Both readers support ID3 `POPM` ratings and unsynced lyrics (ID3 `USLT`, Vorbis `UNSYNCEDLYRICS`). That support was added after the tag reader comparison and checked by the apps' tests on MP3, WAV and FLAC files.
 - **Apple and competitors:**
   - **Local network privacy:** tvOS doesn't have it (TN3179).
   - **Plex:** remote playback of personal video needs Plex Pass or a Remote Watch Pass since April 2025, enforced in stages. Local playback is unaffected.
@@ -501,14 +434,13 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 **Unverified**
 
 - Whether Jellyfin or OpenSubsonic have a change feed.
-- Index size and the time to parse and compare it on an Apple TV for a 100,000-track library (only estimated).
-- VLCKit and AVPlayer playback, seeking and recovery against this server's HTTP contract (the first step in §10), including whether either sends `If-Range` or checks the ETag across range requests.
+- Index size and processing time on an Apple TV with a large library.
+- VLCKit and AVPlayer playback, seeking and recovery against this server's HTTP contract, including whether either sends `If-Range` or checks the ETag across range requests.
 - Whether mtime checks see in-place changes promptly on network volumes the host mounts.
 - How VLCKit's and AVPlayer's track ids map to the container's `trackNumber`.
 - How long players go quiet between requests while buffering, which sets the sleep grace period.
 - Whether volume identity (device ID or volume UUID) reliably detects an unmounted volume on macOS and Windows, including network volumes.
 - VLCKit with self-signed TLS.
-- The Tauri updater across a product-name change.
 - The Music app's lack of FLAC support (from memory).
 - The video reader on real Dolby Vision and HDR10+ releases (only synthetic clips were tested), on Dolby Vision profile 7, on iTunes MP4s, AVI, MPEG-TS and WebM, over network volumes, and on Windows.
 - Whether reading the Wi-Fi name on macOS needs Location permission (from memory).
@@ -516,4 +448,4 @@ The server stores nothing on behalf of clients. Each app keeps its state where i
 - Wake-on-LAN from tvOS.
 - `notify`-crate reliability on network volumes the host itself mounts.
 - The inotify watch limit (`fs.inotify.max_user_watches`) on the Linux distributions users run, for libraries with many directories. From memory, kernels since 5.11 size its default from RAM; older ones default to 8,192.
-- That file-level watching reports a write when a tagger restores the old mtime on Linux and Windows (tested only on macOS, below), and how long FSEvents keeps history for replay. Both should be tested with the taggers users actually run.
+- Whether file-level watching reports a write when a tagger restores the old mtime on Linux and Windows, and how long FSEvents keeps history for replay.

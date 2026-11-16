@@ -56,8 +56,8 @@ drive or another folder, add it as a shared folder of its own.
 ## Desktop app
 
 On macOS, download the DMG from [GitHub Releases](https://github.com/milesegan/minimoon-media-server/releases),
-open it, and drag **MiniMoon Media Server** to Applications. The signed and notarized installer
-contains both Apple silicon and Intel builds.
+open it, and drag **MiniMoon Media Server** to Applications. The installer supports both Apple
+silicon and Intel Macs.
 
 The macOS app checks GitHub Releases for updates at launch. You can also choose **Help →
 Check for Updates…**. The app asks before downloading and restarting the server. If you have
@@ -100,29 +100,6 @@ it writes. CI runs all of this, and fails if the committed bindings are out of d
 The Tauri crate is a workspace member but not a default member, so `cargo build` and `cargo test`
 at the root don't build it (on Linux it needs the WebKitGTK development packages). They do build
 `gui/types/`, which needs nothing more than serde.
-
-### Releasing the macOS app
-
-Set these [GitHub Actions repository secrets](https://github.com/milesegan/minimoon-media-server/settings/secrets/actions)
-for Apple signing and notarization: `APPLE_CERTIFICATE` (the base64-encoded Developer ID Application `.p12`),
-`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` (an
-Apple app-specific password), and `APPLE_TEAM_ID`.
-
-Set `TAURI_SIGNING_PRIVATE_KEY` to the contents of the Media Server's updater private key.
-The matching public key is in `gui/src-tauri/tauri.macos.conf.json`. Keep a secure backup
-of the private key so future releases can be verified by installed copies. For a
-password-protected key, set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` as well.
-
-Keep the versions in `Cargo.toml`, `gui/src-tauri/Cargo.toml`, `gui/types/Cargo.toml`, and
-`gui/package.json` in sync, and update `Cargo.lock` with `cargo update --workspace`. Tauri reads
-the app version from `gui/src-tauri/Cargo.toml`. Commit the version changes, then push a matching
-tag from that commit (for example, `git tag v0.5.0` and `git push origin main v0.5.0`).
-
-The [macOS release workflow](.github/workflows/release.yml) runs the Rust and frontend tests,
-signs and notarizes the universal app and DMG, and publishes the DMG, the signed updater
-archive, its signature, and `latest.json` together. Both macOS architectures use the same
-archive. The release workflow enables updater artifact generation so local builds can
-run without the updater private key.
 
 ## HTTP API
 
